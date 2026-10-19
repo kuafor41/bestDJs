@@ -1,0 +1,70 @@
+name: Build 50-episode test RSS
+on:
+  push:
+    paths:
+      - 'tools/build_test_rss.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: bestdjs-test-rss
+  cancel-in-progress: false
+jobs:
+  build-test-rss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install browser dependencies
+        run: |
+          python -m pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+      - name: Validate required secrets
+        env:
+          SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+        run: |
+          test -n "$SOURCE_USERNAME" || { echo "::error::Missing SOURCE_USERNAME"; exit 1; }
+          test -n "$SOURCE_PASSWORD" || { echo "::error::Missing SOURCE_PASSWORD"; exit 1; }
+      - name: Build separate test RSS (production RSS untouched)
+        env:
+          SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+          TEST_FEED_REQUEST_DELAY: '0.2'
+        run: python tools/build_test_rss.py
+      - name: Verify test feed structure
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse("public/test-rss.xml").getroot()
+          items = root.findall("./channel/item")
+          assert len(items) == 50, f"Expected exactly 50 test episodes, got {len(items)}"
+          for item in items:
+              assert item.findtext("title")
+              assert item.findtext("description")
+              date = item.findtext("pubDate")
+              assert date
+              enclosure = item.find("enclosure")
+              assert enclosure is not None and enclosure.get("type") == "audio/mpeg"
+              assert enclosure.get("url", "").lower().split("?", 1)[0].endswith(".mp3")
+          print("Test RSS structure passed: 50 episodes")
+          PY
+      - name: Commit test RSS only
+        run: |
+          if git diff --quiet -- public/test-rss.xml; then
+            echo "Test RSS unchanged."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add public/test-rss.xml
+            git commit -m "Build 50-episode test RSS for review"
+            git push
+          fi
