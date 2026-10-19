@@ -136,7 +136,7 @@ def authenticate(session: requests.Session):
                 raise RuntimeError("Browser could not locate visible TopDJMixes login fields.")
 
             form = pass_field.locator("xpath=ancestor::form[1]")
-            form_info = form.evaluate("(f) => ({action: f.action, method: f.method, id: f.id, className: String(f.className).slice(0,160)})")
+            form_info = form.evaluate("(f) => ({action: f.action, method: f.method, id: f.id, className: String(f.className).slice(0,160), fields: Array.from(f.querySelectorAll('input,button,select,textarea')).map(e => ({tag:e.tagName.toLowerCase(),name:e.name||'',type:e.type||'',id:e.id||'',visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length),required:!!e.required,autocomplete:e.autocomplete||''})).slice(0,40)})")
             user_field.fill(USER)
             pass_field.fill(PASSWORD)
             submit = form.locator('button[type="submit"]:visible, input[type="submit"]:visible, button:not([type]):visible')
@@ -151,7 +151,14 @@ def authenticate(session: requests.Session):
                 pass
             page.wait_for_timeout(1500)
 
-            login_body = page.locator("body").inner_text(timeout=10000).lower()
+            login_body_raw = page.locator("body").inner_text(timeout=10000)
+            login_body = login_body_raw.lower()
+            form_messages = form.locator(".arm_error_msg, .arm_error, .error, .alert, [role=alert], .arm_success_msg").all_inner_texts()
+            log("browser_login_response", body_excerpt=clean_text(login_body_raw)[:700],
+                form_messages=[clean_text(x)[:180] for x in form_messages[:10]],
+                form_visible=form.is_visible(),
+                submit_buttons=form.locator('button:visible, input[type="submit"]:visible, input[type="button"]:visible').evaluate_all(
+                    "(els) => els.map(e => ({tag:e.tagName.toLowerCase(),type:e.type||'',name:e.name||'',id:e.id||'',text:(e.innerText||e.value||'').trim().slice(0,100),disabled:!!e.disabled})).slice(0,15)"))
             invalid = any(marker in login_body for marker in (
                 "incorrect password", "invalid username", "invalid password",
                 "username or password is incorrect", "too many login attempts",
@@ -162,7 +169,7 @@ def authenticate(session: requests.Session):
                                         if c["name"].startswith(("wordpress_logged_in_", "wordpress_sec_"))})
             log("browser_login_result", path=urlparse(page.url).path, title=page.title(),
                 form_action=form_info["action"], form_method=form_info["method"],
-                form_id=form_info["id"], invalid_credentials_marker=invalid,
+                form_id=form_info["id"], form_fields=form_info.get("fields", []), invalid_credentials_marker=invalid,
                 login_form_still_visible=login_form_remains, logout_text_visible=logout_visible,
                 wordpress_auth_cookie_names=auth_cookie_names,
                 cookie_names=sorted({c["name"] for c in context.cookies()}))

@@ -48,7 +48,7 @@ jobs:
         env:
           SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
           SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
-          MAX_EPISODES: "100"
+          MAX_EPISODES: "50"
         run: python build_feed.py
 
       - name: Validate generated RSS
