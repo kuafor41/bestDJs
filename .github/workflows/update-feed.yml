@@ -1,6 +1,9 @@
 name: Update bestDJs RSS
 
 on:
+  push:
+    paths:
+      - 'build_feed.py'
   workflow_dispatch:
   schedule:
     - cron: "17 */12 * * *"
