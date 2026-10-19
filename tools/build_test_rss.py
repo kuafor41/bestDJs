@@ -97,84 +97,121 @@ def extract_title(soup: BeautifulSoup, fallback: str):
 
 
 def extract_description(soup: BeautifulSoup, title: str):
-    meta_values = []
-    for selector in ('meta[property="og:description"]', 'meta[name="description"]',
-                     'meta[name="twitter:description"]'):
-        node = soup.select_one(selector)
-        if node and node.get("content"):
-            value = core.clean_text(node["content"])
-            if value and value.lower() not in (title.lower(), "top dj mixes"):
-                meta_values.append(value)
-
+    """Copy the episode's Date-to-tracklist block, preserving source line breaks."""
     entry = soup.select_one(".entry-content") or soup.select_one("article")
+    if not entry:
+        return title
+
+    def visible_text(node):
+        clone = BeautifulSoup(str(node), "html.parser")
+        for br in clone.find_all("br"):
+            br.replace_with("\n")
+        for li in clone.find_all("li"):
+            li.insert_before("\n")
+            li.append("\n")
+        text = clone.get_text("", strip=False)
+        lines = []
+        for line in text.replace("\r", "").split("\n"):
+            line = re.sub(r"[\t ]+", " ", line).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    nodes = list(entry.children)
+    start_index = None
+    for i, node in enumerate(nodes):
+        if not getattr(node, "get_text", None):
+            continue
+        text = visible_text(node)
+        if re.match(r"^Date\s*:", text, re.I):
+            start_index = i
+            break
+
+    if start_index is None:
+        for selector in ("p", "div", "section"):
+            for node in entry.select(selector):
+                text = visible_text(node)
+                if re.match(r"^Date\s*:", text, re.I):
+                    return text[:10000]
+        return title
+
     chunks = []
-    if entry:
-        for child in entry.children:
-            if getattr(child, "get", None) and child.get("id") == "download-link":
-                break
-            if getattr(child, "get", None) and child.get("id") in ("advert", "advert-mobile"):
-                continue
-            text = core.clean_text(child.get_text(" ", strip=True) if hasattr(child, "get_text") else str(child))
-            if not text:
-                continue
-            if text.upper() == "DOWNLOAD" or text.lower().startswith("report broken link"):
-                continue
-            chunks.append(text)
-    body_description = core.clean_text(" | ".join(chunks))
-    # Prefer the actual tracklist and episode details, while keeping a useful SEO summary if
-    # the page body is unusually sparse.
-    if len(body_description) >= 80:
-        if meta_values and meta_values[0].lower() not in body_description.lower():
-            return (meta_values[0] + "\n\n" + body_description)[:10000]
-        return body_description[:10000]
-    if meta_values:
-        return meta_values[0][:4000]
-    return body_description[:4000] or title
+    for node in nodes[start_index:]:
+        if getattr(node, "get", None) and node.get("id") in ("download-link", "advert", "advert-mobile"):
+            break
+        if getattr(node, "get", None) and node.name in ("script", "style", "nav", "footer"):
+            continue
+        text = visible_text(node) if getattr(node, "get_text", None) else str(node).strip()
+        if not text or text.upper() == "DOWNLOAD" or text.lower().startswith("report broken link"):
+            continue
+        if chunks and text == chunks[-1]:
+            continue
+        chunks.append(text)
+
+    description = "\n".join(chunks).strip()
+    return description[:10000] if description else title
 
 
-def extract_cover(soup: BeautifulSoup, page_url: str):
-    candidates = []
-    def add(raw, source, width=0, height=0):
-        raw = core.clean_text(raw)
+def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
+    """Prefer artwork whose filename/alt/title matches this show's name, not generic page art."""
+    candidates_by_url = {}
+
+    def normalize(value):
+        value = re.sub(r"\.(?:jpe?g|png|webp)(?:$|\?).*$", "", value, flags=re.I)
+        value = re.sub(r"\b(?:episode|ep|show|radio|podcast)\s*#?\d+\b", " ", value, flags=re.I)
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    show_name = re.sub(r"\s+(?:episode\s*)?#?\d+[a-z]?$", "", episode_title, flags=re.I).strip()
+    show_tokens = set(normalize(show_name).split())
+
+    def add(raw, source, alt="", title="", width=0, height=0):
+        raw = html.unescape(str(raw or "").strip())
         if not raw or raw.startswith("data:"):
             return
-        url = urljoin(page_url, html.unescape(raw))
+        url = urljoin(page_url, raw)
         p = urlparse(url)
-        if p.scheme not in ("http", "https"):
+        if p.scheme not in ("http", "https") or not re.search(r"\.(?:jpe?g|png|webp)(?:$|\?)", p.path, re.I):
             return
-        if not re.search(r"\.(?:jpe?g|png|webp)(?:$|\?)", p.path, re.I):
-            return
-        name = (p.path + " " + p.netloc).lower()
-        score = 70 if source == "meta" else 80
+        path_label = normalize(p.path.rsplit("/", 1)[-1])
+        label = normalize(" ".join((path_label, alt, title)))
+        label_tokens = set(label.split())
+        overlap = len(show_tokens & label_tokens)
+        score = 0
+        if show_tokens and overlap:
+            score += 100 + 15 * overlap
+            if show_tokens.issubset(label_tokens):
+                score += 100
         if source == "content":
-            score += 22
-        if any(t in name for t in ("cover", "artwork", "episode", "mix", "upload")):
-            score += 12
-        if width and height and width >= 250 and height >= 250:
-            score += 12
-        if any(t in name for t in ("logo", "avatar", "favicon", "banner", "advert", "ads-", "spinner", "placeholder")):
-            score -= 120
-        candidates.append((score, url, source))
+            score += 20
+        if width >= 250 and height >= 250:
+            score += 5
+        if any(t in label for t in ("logo", "avatar", "favicon", "banner", "advert", "spinner", "placeholder")):
+            score -= 200
+        candidates_by_url[url] = max(score, candidates_by_url.get(url, -999))
 
     for selector in ('meta[property="og:image"]', 'meta[property="og:image:secure_url"]',
                      'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]'):
         node = soup.select_one(selector)
         if node and node.get("content"):
-            add(node["content"], "meta")
-    for node in soup.select(".entry-content img, article img, .post-thumbnail img, .wp-post-image"):
-        raw = (node.get("data-src") or node.get("data-lazy-src") or node.get("data-original")
-               or node.get("src") or "")
-        width = int(node.get("width", "0")) if str(node.get("width", "0")).isdigit() else 0
-        height = int(node.get("height", "0")) if str(node.get("height", "0")).isdigit() else 0
-        add(raw, "content", width, height)
-        srcset = node.get("srcset", "")
-        if srcset:
-            last = srcset.split(",")[-1].strip().split(" ")[0]
-            add(last, "content", width, height)
-    # Don't invent episode artwork or return a generic site logo as the cover.
-    candidates = sorted(set(candidates), key=lambda x: x[0], reverse=True)
-    return candidates[0][1] if candidates and candidates[0][0] > 0 else None
+            add(node["content"], "meta", node.get("alt", ""), node.get("title", ""))
 
+    entry = soup.select_one(".entry-content") or soup.select_one("article")
+    if entry:
+        for node in entry.select("img"):
+            raw = (node.get("data-src") or node.get("data-lazy-src") or node.get("data-original")
+                   or node.get("src") or "")
+            width = int(node.get("width", "0")) if str(node.get("width", "0")).isdigit() else 0
+            height = int(node.get("height", "0")) if str(node.get("height", "0")).isdigit() else 0
+            add(raw, "content", node.get("alt", ""), node.get("title", ""), width, height)
+            srcset = node.get("srcset", "")
+            if srcset:
+                last = srcset.split(",")[-1].strip().split(" ")[0]
+                add(last, "content", node.get("alt", ""), node.get("title", ""), width, height)
+
+    ranked = sorted(candidates_by_url.items(), key=lambda pair: pair[1], reverse=True)
+    if not ranked or ranked[0][1] < 100:
+        return None
+    return ranked[0][0]
 
 def is_episode_page(soup: BeautifulSoup):
     control = soup.select_one("a.wpdm-download-link.download-on-click")
@@ -263,7 +300,7 @@ def inspect_candidates(session: requests.Session, posts):
             time.sleep(PAUSE)
             continue
         description = extract_description(soup, title)
-        cover = extract_cover(soup, response.url)
+        cover = extract_cover(soup, response.url, title)
         item = {
             "title": title, "page": response.url, "slug": slug, "date": date,
             "date_source": date_source, "description": description, "cover": cover,
