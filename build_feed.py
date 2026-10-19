@@ -162,7 +162,7 @@ def extract_mixshow_links(soup: BeautifulSoup, page_url: str):
     """Find mixshow archive links such as /future-sound-of-egypt/."""
     excluded = {
         "mix-shows", "login", "register", "news", "music-player", "linklists",
-        "schedule", "contact", "privacy-policy", "terms", "gdpr", "my-account",
+        "schedule", "contact", "privacy-policy", "terms", "terms-conditions", "gdpr", "my-account",
         "wp-admin", "wp-content", "wp-json", "category", "tag", "page", "author",
         "search", "feed", "lost-password",
     }
@@ -290,7 +290,7 @@ def main():
     show_links = extract_mixshow_links(catalog_soup, listing.url)
     # The catalog body can be JS-rendered or sparse in plain HTTP responses. The login
     # page footer contains a second directory of mixshow links, so use it as a fallback.
-    if not show_links:
+    if len(show_links) < 5:
         fallback = session.get(LOGIN_URL, headers={"Referer": SHOWS_URL}, timeout=35)
         fallback.raise_for_status()
         show_links = extract_mixshow_links(BeautifulSoup(fallback.text, "html.parser"), fallback.url)
