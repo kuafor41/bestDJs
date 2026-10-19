@@ -61,7 +61,7 @@ def validate_audio_url(session: requests.Session, url: str, referer: str = SHOWS
         content_range = response.headers.get("Content-Range", "")
         content_length = response.headers.get("Content-Length", "")
         total = None
-        match = re.search(r"/(\\d+|\\*)$", content_range)
+        match = re.search(r"/(\d+|\*)$", content_range)
         if match and match.group(1) != "*":
             total = int(match.group(1))
         elif content_length.isdigit() and response.status_code == 200:
