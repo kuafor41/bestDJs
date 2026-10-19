@@ -107,59 +107,6 @@ def form_payload(form):
         payload[name] = item.get("value", "")
     return payload
 
-KNOWN_MP3_URL = "https://files.topdjmixes.com/Resident/Hernan%20Cattaneo%20-%20Resident%20Episode%20805_VPtDbeR7vVpTSTL.mp3"
-KNOWN_EPISODE_URL = BASE + "/resident-805/"
-
-def probe_known_mp3(session: requests.Session):
-    """Check the user's known-working MP3 URL from the GitHub runner without downloading the whole file."""
-    safe_fields = {}
-    try:
-        r = session.get(KNOWN_MP3_URL, headers={**HEADERS, "Range": "bytes=0-1023"},
-                        allow_redirects=True, stream=True, timeout=35)
-        final = urlparse(r.url)
-        safe_fields = {
-            "status": r.status_code,
-            "final_host": final.netloc,
-            "final_path": final.path,
-            "redirect_count": len(r.history),
-            "content_type": r.headers.get("Content-Type", ""),
-            "content_length": r.headers.get("Content-Length", ""),
-            "content_range": r.headers.get("Content-Range", ""),
-            "accept_ranges": r.headers.get("Accept-Ranges", ""),
-            "range_requested": "bytes=0-1023",
-        }
-        # Only read bytes when the server explicitly honored the small range request.
-        if r.status_code == 206:
-            chunk = next(r.iter_content(1024), b"")
-            safe_fields["sample_bytes"] = len(chunk)
-            safe_fields["sample_hex"] = chunk[:16].hex()
-        r.close()
-        safe_fields["looks_like_mp3_response"] = (
-            r.status_code in (200, 206) and
-            ("audio/" in safe_fields["content_type"].lower() or ".mp3" in final.path.lower())
-        )
-        log("known_mp3_probe", **safe_fields)
-    except requests.RequestException as exc:
-        log("known_mp3_probe", error=type(exc).__name__, detail=str(exc)[:220])
-
-    try:
-        page = session.get(KNOWN_EPISODE_URL, headers=HEADERS, timeout=35)
-        soup = BeautifulSoup(page.text, "html.parser")
-        body = clean_text(soup.get_text(" ", strip=True)).lower()
-        links = []
-        for a in soup.select("a[href]"):
-            href = absolute(a.get("href", ""), page.url)
-            if "download" in (clean_text(a.get_text(" ", strip=True)) + " " + href).lower():
-                p = urlparse(href)
-                links.append({"text": clean_text(a.get_text(" ", strip=True))[:70],
-                              "host": p.netloc, "path": p.path})
-        log("known_episode_page_probe", status=page.status_code,
-            final_path=urlparse(page.url).path, title=clean_text(soup.title.get_text(" ", strip=True)) if soup.title else "",
-            login_gate="please login to download or create a free account" in body,
-            download_links=links[:10], html_length=len(page.text))
-    except requests.RequestException as exc:
-        log("known_episode_page_probe", error=type(exc).__name__, detail=str(exc)[:220])
-
 def authenticate(session: requests.Session):
     """Use Chromium for the membership login, then share its cookies with requests."""
     try:
@@ -167,7 +114,7 @@ def authenticate(session: requests.Session):
     except ImportError as exc:
         raise RuntimeError("Playwright is required to authenticate with TopDJMixes.") from exc
 
-    sample_url = BASE + "/future-sound-of-egypt-984/"
+    sample_url = BASE + "/the-midnight-project-228/"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
@@ -184,6 +131,19 @@ def authenticate(session: requests.Session):
                     page.wait_for_timeout(20000)
             if "503 service unavailable" in page.title().lower():
                 raise RuntimeError("TopDJMixes login page continued returning 503 after slow retries.")
+            # Let ARM Membership's browser-side form initialization and nonce/session AJAX finish
+            # before selecting fields. A domcontentloaded-only submit can trip its anti-spam checks.
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1000)
+            pre_submit_text = clean_text(page.locator("body").inner_text(timeout=10000))
+            if "spam detected" in pre_submit_text.lower():
+                log("browser_login_preexisting_block", title=page.title(),
+                    path=urlparse(page.url).path, spam_detected_before_submit=True,
+                    body_excerpt=pre_submit_text[:400])
+                raise RuntimeError("TopDJMixes already displays Spam detected before this login submission; no credentials were submitted.")
             # Some WordPress themes include a hidden header login form before the
             # visible page form. Select visible controls so we submit the actual form.
             user_field = page.locator('input[name="user_login"]:visible').last
@@ -197,9 +157,40 @@ def authenticate(session: requests.Session):
                 raise RuntimeError("Browser could not locate visible TopDJMixes login fields.")
 
             form = pass_field.locator("xpath=ancestor::form[1]")
-            form_info = form.evaluate("(f) => ({action: f.action, method: f.method, id: f.id, className: String(f.className).slice(0,160), fields: Array.from(f.querySelectorAll('input,button,select,textarea')).map(e => ({tag:e.tagName.toLowerCase(),name:e.name||'',type:e.type||'',id:e.id||'',visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length),required:!!e.required,autocomplete:e.autocomplete||''})).slice(0,40)})")
-            user_field.fill(USER)
-            pass_field.fill(PASSWORD)
+            # ARM Membership adds this key dynamically and refreshes its nonce by AJAX.
+            # Do not submit until that same visible form has a named submission key.
+            try:
+                form.locator('input#arm_form_submission_key[name]:not([name=""])').wait_for(
+                    state="attached", timeout=15000
+                )
+            except PlaywrightTimeoutError:
+                readiness = form.evaluate("(f) => ({id:f.id,random_id:f.getAttribute('data-random-id'),"
+                    "submission_key:f.querySelector('#arm_form_submission_key')?.name||'',"
+                    "fields:Array.from(f.querySelectorAll('input[name],input#arm_form_submission_key')).map(e=>"
+                    "({name:e.name||'',id:e.id||'',type:e.type||'',value_present:!!e.value})).slice(0,30)})")
+                log("browser_login_form_not_ready", form_state=readiness,
+                    title=page.title(), path=urlparse(page.url).path)
+                raise RuntimeError("ARM Membership did not initialize its anti-spam submission key; login was not submitted.")
+            form_info = form.evaluate("(f) => ({action: f.action, method: f.method, id: f.id,"
+                "className: String(f.className).slice(0,160),random_id:f.getAttribute('data-random-id'),"
+                "submission_key_name:f.querySelector('#arm_form_submission_key')?.name||'',"
+                "submission_key_ready:!!(f.querySelector('#arm_form_submission_key')?.name),"
+                "honeypot_empty:!((f.querySelector('input[name=arm_filter_input]')?.value||'').trim()),"
+                "fields: Array.from(f.querySelectorAll('input,button,select,textarea')).map(e => "
+                "({tag:e.tagName.toLowerCase(),name:e.name||'',type:e.type||'',id:e.id||'',"
+                "visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length),"
+                "required:!!e.required,autocomplete:e.autocomplete||''})).slice(0,40)})")
+            honeypot = form.locator('input[name="arm_filter_input"]')
+            if honeypot.count() and (honeypot.first.input_value() or "").strip():
+                log("browser_login_honeypot_not_empty", path=urlparse(page.url).path)
+                raise RuntimeError("ARM Membership honeypot was unexpectedly populated; login was not submitted.")
+            # Use actual keyboard events instead of fill(), which skips keypress/keydown.
+            # The ARM form's client-side anti-spam handler observes real typing.
+            user_field.click()
+            user_field.press_sequentially(USER, delay=35)
+            pass_field.click()
+            pass_field.press_sequentially(PASSWORD, delay=35)
+            page.wait_for_timeout(500)
             submit = form.locator('button[type="submit"]:visible, input[type="submit"]:visible, button:not([type]):visible')
             if submit.count():
                 submit.last.click()
@@ -224,6 +215,9 @@ def authenticate(session: requests.Session):
                 "incorrect password", "invalid username", "invalid password",
                 "username or password is incorrect", "too many login attempts",
             ))
+            spam_detected = "spam detected" in login_body
+            log("browser_login_block_status", spam_detected=spam_detected,
+                invalid_credentials_marker=invalid, response_path=urlparse(page.url).path)
             login_form_remains = page.locator('input[name="user_login"]:visible').count() > 0
             logout_visible = page.get_by_text(re.compile(r"\blog ?out\b", re.I)).count() > 0
             auth_cookie_names = sorted({c["name"] for c in context.cookies()
@@ -234,6 +228,8 @@ def authenticate(session: requests.Session):
                 login_form_still_visible=login_form_remains, logout_text_visible=logout_visible,
                 wordpress_auth_cookie_names=auth_cookie_names,
                 cookie_names=sorted({c["name"] for c in context.cookies()}))
+            if spam_detected:
+                raise RuntimeError("TopDJMixes returned Spam detected after one normal keyboard-driven form submission; stopping rather than retrying.")
             if invalid:
                 raise RuntimeError("TopDJMixes returned a login failure message.")
             if login_form_remains and not auth_cookie_names and not logout_visible:
@@ -260,10 +256,16 @@ def authenticate(session: requests.Session):
 
             # Inspect and safely click the Download control once. Intercept MP3/file-host
             # requests before the browser can download audio bytes; we only need its URL.
-            download_controls = page.locator("a,button").evaluate_all(
-                "(els) => els.filter(e => /^\\s*DOWNLOAD\\s*$/i.test((e.innerText || e.textContent || '').trim()))"
-                ".map(e => ({tag:e.tagName.toLowerCase(),href:e.getAttribute('href')||'',id:e.id||'',"
-                "className:String(e.className||'').slice(0,120),onclick:(e.getAttribute('onclick')||'').slice(0,160)})).slice(0,8)"
+            download_controls = page.locator("a,button,input,[role='button'],[onclick],[id*='download' i],[class*='download' i]").evaluate_all(
+                "(els) => els.filter(e => { const visible=!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);"
+                "const text=(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||'').trim();"
+                "const attrs=[e.id||'',String(e.className||''),e.getAttribute('href')||'',e.getAttribute('onclick')||''].join(' ');"
+                "return visible && (/^\\s*DOWNLOAD\\s*$/i.test(text) || /download/i.test(attrs)); })"
+                ".map(e => {const h=e.getAttribute('href')||''; let u=null; try{u=h?new URL(h,location.href):null;}catch(_){}"
+                "return {tag:e.tagName.toLowerCase(),text:(e.innerText||e.textContent||e.value||'').trim().slice(0,100),"
+                "href_host:u?u.host:'',href_path:u?u.pathname:'',href_query_present:u?!!u.search:false,"
+                "id:e.id||'',className:String(e.className||'').slice(0,120),"
+                "onclick:(e.getAttribute('onclick')||'').slice(0,160),type:e.type||'',visible:true}; }).slice(0,20)"
             )
             intercepted_audio = []
             related_requests = []
@@ -300,9 +302,10 @@ def authenticate(session: requests.Session):
             context.route("**/*", route_probe)
             click_error = None
             try:
-                download_button = page.locator("a,button").filter(
-                    has_text=re.compile(r"^\s*DOWNLOAD\s*$", re.I)
-                ).first
+                download_button = page.locator(
+                    "a:visible,button:visible,[role='button']:visible,[onclick]:visible,"
+                    "[id*='download' i]:visible,[class*='download' i]:visible"
+                ).filter(has_text=re.compile(r"^\\s*DOWNLOAD\\s*$", re.I)).first
                 if download_button.count():
                     download_button.click(timeout=7000)
                     page.wait_for_timeout(2500)
@@ -316,7 +319,9 @@ def authenticate(session: requests.Session):
                 page.remove_listener("response", response_probe)
             log("browser_download_click_probe", controls=download_controls,
                 related_requests=related_requests[:20], related_responses=related_responses[:20], intercepted_audio=[
-                    {"host": urlparse(u).netloc, "path": urlparse(u).path, "query_present": bool(urlparse(u).query)}
+                    {"host": urlparse(u).netloc, "path": urlparse(u).path,
+                     "query_present": bool(urlparse(u).query),
+                     "url_if_no_query": u if not urlparse(u).query else None}
                     for u in intercepted_audio[:10]
                 ], click_error=click_error, final_path=urlparse(page.url).path,
                 title=page.title())
@@ -537,7 +542,6 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
     configure_retries(session)
-    probe_known_mp3(session)
     listing, browser_catalog_html = authenticate(session)
     # Prefer catalogue links captured from the authenticated browser, then merge HTTP links.
     browser_soup = BeautifulSoup(browser_catalog_html, "html.parser")
