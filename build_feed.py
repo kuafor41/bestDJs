@@ -63,22 +63,69 @@ def authenticate(session: requests.Session):
     login_page.raise_for_status()
     soup = BeautifulSoup(login_page.text, "html.parser")
     forms = soup.find_all("form")
+    def field_hint(node):
+        parts = [
+            node.get("name", ""), node.get("id", ""), node.get("type", ""),
+            node.get("placeholder", ""), node.get("autocomplete", ""),
+            node.get("aria-label", ""),
+        ]
+        node_id = node.get("id")
+        if node_id:
+            label = soup.find("label", attrs={"for": node_id})
+            if label:
+                parts.append(label.get_text(" ", strip=True))
+        return " ".join(parts).lower()
+
     candidates = []
     for form in forms:
-        names = {x.get("name", "") for x in form.select("[name]")}
-        if any("user_login" in n or n in ("log", "username", "user_email") for n in names) and any(
-            "user_pass" in n or n in ("pwd", "password") for n in names
-        ):
-            candidates.append(form)
+        fields = form.select("input, select, textarea")
+        passwords = [x for x in fields if (x.get("type") or "").lower() == "password"]
+        usernames = [
+            x for x in fields
+            if (x.get("type") or "text").lower() in ("text", "email", "tel")
+            and (x.get("name") or "").strip()
+            and not any(token in field_hint(x) for token in ("search", "coupon", "comment"))
+        ]
+        if passwords and usernames:
+            # Prefer a field explicitly marked as a username/email, otherwise the first
+            # eligible text/email field in the same form.
+            usernames.sort(key=lambda x: (
+                not any(token in field_hint(x) for token in ("user", "login", "email", "account")),
+                fields.index(x),
+            ))
+            candidates.append((form, usernames[0], passwords[0]))
+
     if not candidates:
-        raise RuntimeError("Login form with username/password fields not found; inspect sanitized form diagnostics.")
-    form = candidates[0]
+        diagnostics = []
+        for index, form in enumerate(forms, 1):
+            fields = []
+            for node in form.select("input, select, textarea, button"):
+                fields.append({
+                    "tag": node.name,
+                    "type": node.get("type", ""),
+                    "name": node.get("name", ""),
+                    "id": node.get("id", ""),
+                    "autocomplete": node.get("autocomplete", ""),
+                    "placeholder": node.get("placeholder", ""),
+                })
+            diagnostics.append({
+                "index": index,
+                "id": form.get("id", ""),
+                "class": " ".join(form.get("class", [])),
+                "action_path": urlparse(absolute(form.get("action") or login_page.url, login_page.url)).path,
+                "fields": fields,
+            })
+        log("login_form_diagnostics", form_count=len(forms), forms=diagnostics,
+            page_input_count=len(soup.select("input, select, textarea")))
+        raise RuntimeError("Could not identify a form containing both a password and username/email field.")
+
+    form, user_field, pass_field = candidates[0]
     payload = form_payload(form)
     names = set(payload)
-    user_key = next((n for n in ("user_login", "log", "username", "user_email", "email") if n in names), None)
-    pass_key = next((n for n in ("user_pass", "pwd", "password") if n in names), None)
+    user_key = user_field.get("name")
+    pass_key = pass_field.get("name")
     if not user_key or not pass_key:
-        raise RuntimeError("Could not identify username/password field names.")
+        raise RuntimeError("Detected login fields without POST names; sanitized form diagnostics required.")
     payload[user_key] = USER
     payload[pass_key] = PASSWORD
     for key in ("rememberme", "remember", "arm_rememberme"):
