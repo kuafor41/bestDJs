@@ -258,6 +258,52 @@ def authenticate(session: requests.Session):
             if gate:
                 raise RuntimeError("Login did not unlock the sample episode's Download area.")
 
+            # Inspect and safely click the Download control once. Intercept MP3/file-host
+            # requests before the browser can download audio bytes; we only need its URL.
+            download_controls = page.locator("a,button").evaluate_all(
+                "(els) => els.filter(e => /^\\s*DOWNLOAD\\s*$/i.test((e.innerText || e.textContent || '').trim()))"
+                ".map(e => ({tag:e.tagName.toLowerCase(),href:e.getAttribute('href')||'',id:e.id||'',"
+                "className:String(e.className||'').slice(0,120),onclick:(e.getAttribute('onclick')||'').slice(0,160)})).slice(0,8)"
+            )
+            intercepted_audio = []
+            related_requests = []
+            def route_probe(route):
+                request_url = route.request.url
+                parsed_url = urlparse(request_url)
+                if is_mp3(request_url) or parsed_url.netloc.lower() == "files.topdjmixes.com":
+                    intercepted_audio.append(request_url)
+                    route.abort()
+                else:
+                    route.continue_()
+            def request_probe(request):
+                parsed_url = urlparse(request.url)
+                if "admin-ajax.php" in parsed_url.path or "download" in parsed_url.path.lower():
+                    related_requests.append({"method": request.method, "host": parsed_url.netloc,
+                                             "path": parsed_url.path, "resource_type": request.resource_type})
+            page.on("request", request_probe)
+            context.route("**/*", route_probe)
+            click_error = None
+            try:
+                download_button = page.locator("a,button").filter(
+                    has_text=re.compile(r"^\\s*DOWNLOAD\\s*$", re.I)
+                ).first
+                if download_button.count():
+                    download_button.click(timeout=7000)
+                    page.wait_for_timeout(2500)
+                else:
+                    click_error = "No exact DOWNLOAD control found"
+            except Exception as exc:
+                click_error = type(exc).__name__
+            finally:
+                context.unroute("**/*", route_probe)
+                page.remove_listener("request", request_probe)
+            log("browser_download_click_probe", controls=download_controls,
+                related_requests=related_requests[:20], intercepted_audio=[
+                    {"host": urlparse(u).netloc, "path": urlparse(u).path, "query_present": bool(urlparse(u).query)}
+                    for u in intercepted_audio[:10]
+                ], click_error=click_error, final_path=urlparse(page.url).path,
+                title=page.title())
+
             for cookie in context.cookies():
                 if "topdjmixes.com" in cookie.get("domain", ""):
                     session.cookies.set(cookie["name"], cookie["value"],
