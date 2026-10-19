@@ -15,6 +15,7 @@ from urllib.parse import urlparse, urljoin
 
 import requests
 from bs4 import BeautifulSoup
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_feed as core
 
 BASE = core.BASE
@@ -220,7 +221,7 @@ def wordpress_posts(session: requests.Session):
             if canonical not in seen:
                 seen.add(canonical)
                 all_posts.append({**post, "link": canonical})
-        total_pages = int(response.headers.get("X-WP-TotalPages", str(page_num)))
+        total_pages = int(response.headers.get("X-WP-TotalPages", str(REST_PAGES_LIMIT)))
         emit("rest_posts_page", page=page_num, returned=len(posts),
              total_posts_seen=len(all_posts), advertised_total_pages=total_pages)
         if page_num >= total_pages or len(all_posts) >= 500:
