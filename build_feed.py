@@ -491,9 +491,13 @@ def main():
     if len(show_links) < 5:
         fallback = session.get(LOGIN_URL, headers={"Referer": SHOWS_URL}, timeout=35)
         fallback.raise_for_status()
-        show_links = extract_mixshow_links(BeautifulSoup(fallback.text, "html.parser"), fallback.url)
+        fallback_links = extract_mixshow_links(BeautifulSoup(fallback.text, "html.parser"), fallback.url)
+        # Merge fallback links; never discard links already extracted from the authenticated browser.
+        show_links.update({u: t for u, t in fallback_links.items() if u not in show_links})
         log("catalog_fallback", status=fallback.status_code,
-            content_length=len(fallback.text), title=clean_text(BeautifulSoup(fallback.text, "html.parser").title.get_text(" ", strip=True))
+            content_length=len(fallback.text), fallback_show_count=len(fallback_links),
+            fallback_samples=list(fallback_links.items())[:10],
+            title=clean_text(BeautifulSoup(fallback.text, "html.parser").title.get_text(" ", strip=True))
             if BeautifulSoup(fallback.text, "html.parser").title else "")
     log("shows_discovered", count=len(show_links), sample=list(show_links.items())[:5],
         catalog_html_length=len(listing.text))
