@@ -305,7 +305,7 @@ def authenticate(session: requests.Session):
                 download_button = page.locator(
                     "a:visible,button:visible,[role='button']:visible,[onclick]:visible,"
                     "[id*='download' i]:visible,[class*='download' i]:visible"
-                ).filter(has_text=re.compile(r"^\\s*DOWNLOAD\\s*$", re.I)).first
+                ).filter(has_text=re.compile(r"^\s*DOWNLOAD\s*$", re.I)).first
                 if download_button.count():
                     download_button.click(timeout=7000)
                     page.wait_for_timeout(2500)
