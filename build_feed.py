@@ -284,6 +284,7 @@ def authenticate(session: requests.Session):
                 "onclick:(e.getAttribute('onclick')||'').slice(0,160),type:e.type||'',visible:true}; }).slice(0,20)"
             )
             intercepted_audio = []
+            clicked_download_endpoints = []
             related_requests = []
             related_responses = []
             related_response_objects = []
@@ -292,8 +293,14 @@ def authenticate(session: requests.Session):
             def route_probe(route):
                 request_url = route.request.url
                 parsed_url = urlparse(request_url)
-                # Abort audio requests before the browser can fetch the MP3 body.
-                if is_mp3(request_url) or parsed_url.netloc.lower() == "files.topdjmixes.com":
+                # Stop at the site's own Download endpoint before it follows the redirect
+                # to the MP3. Resolve that endpoint with a Range request after browser cookies
+                # have been transferred; do not let Chromium fetch the full audio file.
+                if (parsed_url.netloc.lower() in {"www.topdjmixes.com", "topdjmixes.com"}
+                        and parsed_url.path.startswith("/download/")):
+                    clicked_download_endpoints.append(request_url)
+                    route.abort()
+                elif is_mp3(request_url) or parsed_url.netloc.lower() == "files.topdjmixes.com":
                     intercepted_audio.append(request_url)
                     route.abort()
                 else:
@@ -345,9 +352,7 @@ def authenticate(session: requests.Session):
                     # for the generated file URL; the route above aborts the MP3 request itself.
                     for _ in range(80):
                         page.wait_for_timeout(500)
-                        if intercepted_audio:
-                            break
-                        if page.locator('a[href*=".mp3" i],audio[src*=".mp3" i],source[src*=".mp3" i]').count():
+                        if intercepted_audio or clicked_download_endpoints:
                             break
                 else:
                     click_error = "No visible WPDM download control or exact DOWNLOAD button found"
@@ -392,6 +397,12 @@ def authenticate(session: requests.Session):
             page.remove_listener("response", response_probe)
             log("browser_download_click_probe", click_target=click_target, controls=download_controls,
                 related_requests=related_requests[:30], related_responses=related_responses[:30],
+                clicked_download_endpoints=[
+                    {"host": urlparse(u).netloc, "path": urlparse(u).path,
+                     "query_present": bool(urlparse(u).query),
+                     "url_if_no_query": u if not urlparse(u).query else None}
+                    for u in clicked_download_endpoints[:10]
+                ],
                 post_click_links=post_click_links,
                 response_audio_candidates=[
                     {"host": urlparse(u).netloc, "path": urlparse(u).path,
@@ -436,7 +447,46 @@ def authenticate(session: requests.Session):
         finally:
             browser.close()
 
-    # Validate only audio URLs actually produced by the site's Download-button flow.
+    # Resolve the site's own /download/<slug>/ endpoint using a one-byte Range request.
+    # The browser route above aborts the endpoint before it can redirect to a full MP3 transfer.
+    resolved_download_audio = []
+    for endpoint in list(dict.fromkeys(clicked_download_endpoints))[:5]:
+        response = None
+        try:
+            response = session.get(
+                endpoint, headers={**HEADERS, "Referer": sample_url, "Range": "bytes=0-0"},
+                allow_redirects=True, stream=True, timeout=(15, 30)
+            )
+            final_url = response.url
+            parsed_final = urlparse(final_url)
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            content_range = response.headers.get("Content-Range", "")
+            sample_bytes = 0
+            if response.status_code == 206:
+                sample_bytes = len(next(response.iter_content(1), b""))
+            valid = (
+                response.status_code in (200, 206)
+                and (content_type.startswith("audio/") or is_mp3(final_url))
+                and not parsed_final.path.lower().endswith((".html", ".htm"))
+            )
+            log("download_click_audio_range_probe",
+                endpoint_path=urlparse(endpoint).path,
+                final_host=parsed_final.netloc, final_path=parsed_final.path,
+                final_query_present=bool(parsed_final.query),
+                final_url_if_no_query=final_url if not parsed_final.query else None,
+                status=response.status_code, content_type=content_type,
+                content_range=content_range, range_requested="bytes=0-0",
+                sample_bytes=sample_bytes, redirect_count=len(response.history), valid=valid)
+            if valid and is_mp3(final_url):
+                resolved_download_audio.append(final_url)
+        except requests.RequestException as exc:
+            log("download_click_endpoint_probe_error",
+                endpoint_path=urlparse(endpoint).path, error=type(exc).__name__)
+        finally:
+            if response is not None:
+                response.close()
+
+    # Validate any MP3 URL exposed directly by the clicked control / small response bodies.
     # Each check is a one-byte Range request; no full MP3 is read.
     clicked_urls = list(dict.fromkeys(intercepted_audio + audio_candidates))
     for audio_url in clicked_urls[:10]:
