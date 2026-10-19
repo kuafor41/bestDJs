@@ -267,6 +267,7 @@ def authenticate(session: requests.Session):
             )
             intercepted_audio = []
             related_requests = []
+            related_responses = []
             def route_probe(route):
                 request_url = route.request.url
                 parsed_url = urlparse(request_url)
@@ -282,7 +283,20 @@ def authenticate(session: requests.Session):
                 if len(related_requests) < 60:
                     related_requests.append({"method": request.method, "host": parsed_url.netloc,
                                              "path": parsed_url.path, "resource_type": request.resource_type})
+            def response_probe(response):
+                parsed_url = urlparse(response.url)
+                if len(related_responses) < 30:
+                    try:
+                        headers = response.headers
+                        content_type = headers.get("content-type", "")[:100]
+                    except Exception:
+                        content_type = ""
+                    if (parsed_url.netloc.lower() in {"topdjmixes.com", "www.topdjmixes.com", "files.topdjmixes.com"}
+                            or any(term in parsed_url.path.lower() for term in ("download", "admin-ajax", "/wp-json/"))):
+                        related_responses.append({"status": response.status, "host": parsed_url.netloc,
+                                                  "path": parsed_url.path, "content_type": content_type})
             page.on("request", request_probe)
+            page.on("response", response_probe)
             context.route("**/*", route_probe)
             click_error = None
             try:
@@ -299,8 +313,9 @@ def authenticate(session: requests.Session):
             finally:
                 context.unroute("**/*", route_probe)
                 page.remove_listener("request", request_probe)
+                page.remove_listener("response", response_probe)
             log("browser_download_click_probe", controls=download_controls,
-                related_requests=related_requests[:20], intercepted_audio=[
+                related_requests=related_requests[:20], related_responses=related_responses[:20], intercepted_audio=[
                     {"host": urlparse(u).netloc, "path": urlparse(u).path, "query_present": bool(urlparse(u).query)}
                     for u in intercepted_audio[:10]
                 ], click_error=click_error, final_path=urlparse(page.url).path,
