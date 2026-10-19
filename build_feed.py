@@ -57,106 +57,94 @@ def form_payload(form):
     return payload
 
 def authenticate(session: requests.Session):
-    login_page = session.get(LOGIN_URL, timeout=35)
-    log("login_page", status=login_page.status_code, final_path=urlparse(login_page.url).path,
-        content_type=login_page.headers.get("Content-Type", "").split(";")[0])
-    login_page.raise_for_status()
-    soup = BeautifulSoup(login_page.text, "html.parser")
-    forms = soup.find_all("form")
-    def field_hint(node):
-        parts = [
-            node.get("name", ""), node.get("id", ""), node.get("type", ""),
-            node.get("placeholder", ""), node.get("autocomplete", ""),
-            node.get("aria-label", ""),
-        ]
-        node_id = node.get("id")
-        if node_id:
-            label = soup.find("label", attrs={"for": node_id})
-            if label:
-                parts.append(label.get_text(" ", strip=True))
-        return " ".join(parts).lower()
+    """Use Chromium for the membership login, then share its cookies with requests."""
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    except ImportError as exc:
+        raise RuntimeError("Playwright is required to authenticate with TopDJMixes.") from exc
 
-    candidates = []
-    for form in forms:
-        fields = form.select("input, select, textarea")
-        passwords = [x for x in fields if (x.get("type") or "").lower() == "password"]
-        usernames = [
-            x for x in fields
-            if (x.get("type") or "text").lower() in ("text", "email", "tel")
-            and (x.get("name") or "").strip()
-            and not any(token in field_hint(x) for token in ("search", "coupon", "comment"))
-        ]
-        if passwords and usernames:
-            # Prefer a field explicitly marked as a username/email, otherwise the first
-            # eligible text/email field in the same form.
-            usernames.sort(key=lambda x: (
-                not any(token in field_hint(x) for token in ("user", "login", "email", "account")),
-                fields.index(x),
+    sample_url = BASE + "/future-sound-of-egypt-984/"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(user_agent=HEADERS["User-Agent"])
+        page = context.new_page()
+        try:
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+            user_field = page.locator('input[name="user_login"]').first
+            pass_field = page.locator('input[name="user_pass"]').first
+            if user_field.count() == 0 or pass_field.count() == 0:
+                log("browser_login_form", username_field=user_field.count() > 0,
+                    password_field=pass_field.count() > 0, title=page.title(),
+                    path=urlparse(page.url).path)
+                raise RuntimeError("Browser could not locate TopDJMixes login fields.")
+
+            form = pass_field.locator("xpath=ancestor::form[1]")
+            user_field.fill(USER)
+            pass_field.fill(PASSWORD)
+            submit = form.locator('button[type="submit"], input[type="submit"], button:not([type])')
+            if submit.count():
+                submit.first.click()
+            else:
+                pass_field.press("Enter")
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1500)
+
+            login_body = page.locator("body").inner_text(timeout=10000).lower()
+            invalid = any(marker in login_body for marker in (
+                "incorrect password", "invalid username", "invalid password",
+                "username or password is incorrect", "too many login attempts",
             ))
-            candidates.append((form, usernames[0], passwords[0]))
+            log("browser_login_result", path=urlparse(page.url).path, title=page.title(),
+                invalid_credentials_marker=invalid,
+                cookie_names=sorted({c["name"] for c in context.cookies()}))
+            if invalid:
+                raise RuntimeError("TopDJMixes returned a login failure message.")
 
-    if not candidates:
-        diagnostics = []
-        for index, form in enumerate(forms, 1):
-            fields = []
-            for node in form.select("input, select, textarea, button"):
-                fields.append({
-                    "tag": node.name,
-                    "type": node.get("type", ""),
-                    "name": node.get("name", ""),
-                    "id": node.get("id", ""),
-                    "autocomplete": node.get("autocomplete", ""),
-                    "placeholder": node.get("placeholder", ""),
-                })
-            diagnostics.append({
-                "index": index,
-                "id": form.get("id", ""),
-                "class": " ".join(form.get("class", [])),
-                "action_path": urlparse(absolute(form.get("action") or login_page.url, login_page.url)).path,
-                "fields": fields,
-            })
-        log("login_form_diagnostics", form_count=len(forms), forms=diagnostics,
-            page_input_count=len(soup.select("input, select, textarea")))
-        raise RuntimeError("Could not identify a form containing both a password and username/email field.")
+            page.goto(sample_url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(500)
+            body = page.locator("body").inner_text(timeout=10000).lower()
+            gate = "please login to download or create a free account" in body
+            download_links = page.locator('a[href]').evaluate_all(
+                "(els) => els.filter(a => /download/i.test((a.innerText || '') + ' ' + a.href))"
+                ".map(a => ({text: (a.innerText || '').trim().slice(0,80), href: a.href}))"
+            )
+            log("browser_episode_probe", path=urlparse(page.url).path, title=page.title(),
+                download_gate=gate, download_links=download_links[:8],
+                html_length=len(page.content()),
+                cookie_names=sorted({c["name"] for c in context.cookies()}))
+            if gate:
+                raise RuntimeError("Login did not unlock the sample episode's Download area.")
 
-    form, user_field, pass_field = candidates[0]
-    payload = form_payload(form)
-    names = set(payload)
-    user_key = user_field.get("name")
-    pass_key = pass_field.get("name")
-    if not user_key or not pass_key:
-        raise RuntimeError("Detected login fields without POST names; sanitized form diagnostics required.")
-    payload[user_key] = USER
-    payload[pass_key] = PASSWORD
-    for key in ("rememberme", "remember", "arm_rememberme"):
-        if key in names:
-            payload[key] = "1"
-    action = absolute(form.get("action") or login_page.url, login_page.url)
-    headers = dict(HEADERS)
-    headers.update({"Referer": login_page.url, "Origin": BASE})
-    response = session.post(action, data=payload, headers=headers, allow_redirects=True, timeout=45)
-    log("login_submit", status=response.status_code, final_path=urlparse(response.url).path,
-        form_action_path=urlparse(action).path, form_count=len(forms),
-        field_names=sorted(names), response_type=response.headers.get("Content-Type", "").split(";")[0],
-        logged_in_cookie=any(c.name.startswith("wordpress_logged_in") for c in session.cookies),
-        cookie_names=sorted({c.name for c in session.cookies}))
-    response.raise_for_status()
-    # Some membership plugins use AJAX to establish the session. A successful redirect alone
-    # is not proof: verify access to the member-only mix-show page.
-    probe = session.get(SHOWS_URL, headers={"Referer": response.url}, timeout=45)
-    text = probe.text.lower()
-    denied = any(marker in text for marker in (
-        "please login to download", "you must be logged in", "log in to access",
-        "you need to be logged in", "arm_form", "name=\"user_pass\"",
-    ))
-    log("auth_probe", status=probe.status_code, final_path=urlparse(probe.url).path,
-        logged_in_cookie=any(c.name.startswith("wordpress_logged_in") for c in session.cookies),
-        access_denied_marker=denied, page_title=clean_text(BeautifulSoup(probe.text, "html.parser").title.get_text(" ", strip=True))
-        if BeautifulSoup(probe.text, "html.parser").title else "")
+            for cookie in context.cookies():
+                if "topdjmixes.com" in cookie.get("domain", ""):
+                    session.cookies.set(cookie["name"], cookie["value"],
+                                        domain=cookie["domain"], path=cookie.get("path", "/"))
+        finally:
+            browser.close()
+
+    # Verify that the transferred HTTP session retains the same member access.
+    probe = session.get(sample_url, headers={"Referer": LOGIN_URL}, timeout=45)
     probe.raise_for_status()
-    if denied or (urlparse(probe.url).path.rstrip("/") == "/login"):
-        raise RuntimeError("Account session did not pass the member-page access check.")
-    return probe
+    probe_soup = BeautifulSoup(probe.text, "html.parser")
+    probe_body = clean_text(probe_soup.get_text(" ", strip=True)).lower()
+    gate = "please login to download or create a free account" in probe_body
+    log("http_session_probe", status=probe.status_code, path=urlparse(probe.url).path,
+        html_length=len(probe.text), download_gate=gate,
+        cookie_names=sorted({c.name for c in session.cookies}))
+    if gate:
+        raise RuntimeError("Browser login appeared to complete, but transferred cookies do not unlock Download.")
+    listing = session.get(SHOWS_URL, headers={"Referer": sample_url}, timeout=45)
+    listing.raise_for_status()
+    log("listing_fetch", status=listing.status_code, final_path=urlparse(listing.url).path,
+        html_length=len(listing.text))
+    return listing
 
 def extract_mixshow_links(soup: BeautifulSoup, page_url: str):
     """Find mixshow archive links such as /future-sound-of-egypt/."""
@@ -239,6 +227,32 @@ def fetch_episode(session, url, fallback_title):
     title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else fallback_title
     title = re.sub(r"\s*[|–-]\s*TopDJMixes.*$", "", title, flags=re.I).strip() or fallback_title
     audio = find_audio(soup, r.url)
+    if not audio:
+        # The site may expose a Download button that redirects to the protected MP3.
+        for anchor in soup.select("a[href]"):
+            label = clean_text(anchor.get_text(" ", strip=True)).lower()
+            href = anchor.get("href", "")
+            if "download" not in label and "download" not in href.lower():
+                continue
+            target = absolute(href, r.url)
+            if urlparse(target).netloc.lower() not in (
+                "www.topdjmixes.com", "topdjmixes.com", "files.topdjmixes.com"
+            ):
+                continue
+            try:
+                download_response = session.get(
+                    target, headers={"Referer": r.url}, allow_redirects=True,
+                    stream=True, timeout=45
+                )
+                final_url = download_response.url
+                content_type = download_response.headers.get("Content-Type", "").lower()
+                status = download_response.status_code
+                download_response.close()
+                if status < 400 and (is_mp3(final_url) or "audio/mpeg" in content_type):
+                    audio = final_url
+                    break
+            except requests.RequestException:
+                continue
     if not audio:
         return None
     description = ""
