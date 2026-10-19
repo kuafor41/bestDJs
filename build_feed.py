@@ -304,6 +304,28 @@ def authenticate(session: requests.Session):
                 ], click_error=click_error, final_path=urlparse(page.url).path,
                 title=page.title())
 
+            # Inspect the catalogue in the same authenticated browser that passed the episode gate.
+            page.goto(SHOWS_URL, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1000)
+            browser_catalog_html = page.content()
+            browser_catalog_soup = BeautifulSoup(browser_catalog_html, "html.parser")
+            anchor_samples = []
+            for a in browser_catalog_soup.select("a[href]"):
+                label = clean_text(a.get_text(" ", strip=True))
+                href = absolute(a.get("href", ""), page.url)
+                if label and any(term in label.lower() for term in ("future sound", "resident", "anjunadeep", "state of trance", "mix show")):
+                    parsed = urlparse(href)
+                    anchor_samples.append({"text": label[:70], "host": parsed.netloc, "path": parsed.path})
+                if len(anchor_samples) >= 25:
+                    break
+            log("browser_catalog_probe", path=urlparse(page.url).path,
+                html_length=len(browser_catalog_html), anchors=len(browser_catalog_soup.select("a[href]")),
+                show_anchor_samples=anchor_samples)
+
             for cookie in context.cookies():
                 if "topdjmixes.com" in cookie.get("domain", ""):
                     session.cookies.set(cookie["name"], cookie["value"],
@@ -322,27 +344,6 @@ def authenticate(session: requests.Session):
         cookie_names=sorted({c.name for c in session.cookies}))
     if gate:
         raise RuntimeError("Browser login appeared to complete, but transferred cookies do not unlock Download.")
-    # Inspect the catalogue in the same authenticated browser that passed the episode gate.
-    page.goto(SHOWS_URL, wait_until="domcontentloaded", timeout=45000)
-    try:
-        page.wait_for_load_state("networkidle", timeout=10000)
-    except PlaywrightTimeoutError:
-        pass
-    page.wait_for_timeout(1000)
-    browser_catalog_html = page.content()
-    browser_catalog_soup = BeautifulSoup(browser_catalog_html, "html.parser")
-    anchor_samples = []
-    for a in browser_catalog_soup.select("a[href]"):
-        label = clean_text(a.get_text(" ", strip=True))
-        href = absolute(a.get("href", ""), page.url)
-        if label and any(term in label.lower() for term in ("future sound", "resident", "anjunadeep", "state of trance", "mix show")):
-            parsed = urlparse(href)
-            anchor_samples.append({"text": label[:70], "host": parsed.netloc, "path": parsed.path})
-        if len(anchor_samples) >= 25:
-            break
-    log("browser_catalog_probe", path=urlparse(page.url).path,
-        html_length=len(browser_catalog_html), anchors=len(browser_catalog_soup.select("a[href]")),
-        show_anchor_samples=anchor_samples)
     listing = session.get(SHOWS_URL, headers={"Referer": sample_url}, timeout=45)
     listing.raise_for_status()
     log("listing_fetch", status=listing.status_code, final_path=urlparse(listing.url).path,
