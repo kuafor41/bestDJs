@@ -158,6 +158,31 @@ def authenticate(session: requests.Session):
         raise RuntimeError("Account session did not pass the member-page access check.")
     return probe
 
+def extract_mixshow_links(soup: BeautifulSoup, page_url: str):
+    """Find mixshow archive links such as /future-sound-of-egypt/."""
+    excluded = {
+        "mix-shows", "login", "register", "news", "music-player", "linklists",
+        "schedule", "contact", "privacy-policy", "terms", "gdpr", "my-account",
+        "wp-admin", "wp-content", "wp-json", "category", "tag", "page", "author",
+        "search", "feed", "lost-password",
+    }
+    found = {}
+    for a in soup.select("a[href]"):
+        href = absolute(a.get("href", ""), page_url)
+        parsed = urlparse(href)
+        if parsed.netloc.lower() not in ("www.topdjmixes.com", "topdjmixes.com"):
+            continue
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 1:
+            continue
+        slug = parts[0].lower()
+        if slug in excluded or re.search(r"\\d", slug) or slug.startswith(("wp-", "page-")):
+            continue
+        title = clean_text(a.get_text(" ", strip=True)) or clean_text(a.get("title", ""))
+        if title and len(title) > 1:
+            found[href.split("#")[0].rstrip("/") + "/"] = title
+    return found
+
 def extract_show_links(soup: BeautifulSoup, page_url: str):
     found = {}
     for a in soup.select("a[href]"):
@@ -261,27 +286,49 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
     listing = authenticate(session)
-    links = extract_show_links(BeautifulSoup(listing.text, "html.parser"), listing.url)
-    # Pagination: inspect up to five pages, deduplicating by canonical URL.
-    for page_no in range(2, 6):
-        next_url = urljoin(SHOWS_URL, f"page/{page_no}/")
-        try:
-            r = session.get(next_url, headers={"Referer": listing.url}, timeout=30)
-            if r.status_code != 200 or urlparse(r.url).path.rstrip("/") == "/login":
-                break
-            more = extract_show_links(BeautifulSoup(r.text, "html.parser"), r.url)
-            if not more:
-                break
-            links.update(more)
-        except requests.RequestException as exc:
-            log("pagination_stop", page=page_no, error=type(exc).__name__)
+    catalog_soup = BeautifulSoup(listing.text, "html.parser")
+    show_links = extract_mixshow_links(catalog_soup, listing.url)
+    # The catalog body can be JS-rendered or sparse in plain HTTP responses. The login
+    # page footer contains a second directory of mixshow links, so use it as a fallback.
+    if not show_links:
+        fallback = session.get(LOGIN_URL, headers={"Referer": SHOWS_URL}, timeout=35)
+        fallback.raise_for_status()
+        show_links = extract_mixshow_links(BeautifulSoup(fallback.text, "html.parser"), fallback.url)
+        log("catalog_fallback", status=fallback.status_code,
+            content_length=len(fallback.text), title=clean_text(BeautifulSoup(fallback.text, "html.parser").title.get_text(" ", strip=True))
+            if BeautifulSoup(fallback.text, "html.parser").title else "")
+    log("shows_discovered", count=len(show_links), sample=list(show_links.items())[:5],
+        catalog_html_length=len(listing.text))
+    if not show_links:
+        raise RuntimeError("No mixshow archive links discovered in the catalog or login-page directory.")
+
+    # Each mixshow archive lists its own episode pages. Sample the newest four links
+    # from each archive so one show cannot monopolize the feed.
+    episode_links = {}
+    max_shows = int(os.environ.get("MAX_SHOWS", "250"))
+    per_show = int(os.environ.get("EPISODES_PER_SHOW", "4"))
+    for show_index, (show_url, show_title) in enumerate(show_links.items(), 1):
+        if show_index > max_shows:
             break
-    log("shows_discovered", count=len(links))
-    if not links:
-        raise RuntimeError("No episode pages discovered on the authenticated mix-shows listing.")
+        try:
+            show_response = session.get(show_url, headers={"Referer": SHOWS_URL}, timeout=35)
+            show_response.raise_for_status()
+            show_soup = BeautifulSoup(show_response.text, "html.parser")
+            found = extract_show_links(show_soup, show_response.url)
+            for episode_url, episode_title in list(found.items())[:per_show]:
+                episode_links.setdefault(episode_url, episode_title)
+            if show_index % 25 == 0:
+                log("show_progress", checked=show_index, episode_pages=len(episode_links))
+        except (requests.RequestException, ValueError) as exc:
+            log("show_error", url=show_url, error=type(exc).__name__)
+        time.sleep(0.08)
+    log("episode_pages_discovered", count=len(episode_links), sample=list(episode_links.items())[:5])
+    if not episode_links:
+        raise RuntimeError("No episode pages were discovered inside the mixshow archive pages.")
+
     episodes = []
     errors = 0
-    for index, (url, title) in enumerate(links.items(), 1):
+    for index, (url, title) in enumerate(episode_links.items(), 1):
         try:
             item = fetch_episode(session, url, title)
             if item:
@@ -295,7 +342,7 @@ def main():
             break
         time.sleep(0.15)
     if not episodes:
-        raise RuntimeError("No direct MP3 enclosures were extracted; refusing to publish an empty feed.")
+        raise RuntimeError("Episode pages were discovered, but no direct MP3 URLs were exposed to the crawler. Check login/download authorization or the Download-button redirect.")
     episodes.sort(key=lambda x: x["date"], reverse=True)
     write_rss(episodes)
     log("feed_written", file=str(OUT), episodes=len(episodes), errors=errors,
