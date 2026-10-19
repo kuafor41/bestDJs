@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Run only the authenticated TopDJMixes Download-button probe; do not write RSS."""
 import requests
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_feed
 
 def main():
