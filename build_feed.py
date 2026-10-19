@@ -70,22 +70,28 @@ def authenticate(session: requests.Session):
         page = context.new_page()
         try:
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
-            user_field = page.locator('input[name="user_login"]').first
-            pass_field = page.locator('input[name="user_pass"]').first
+            # Some WordPress themes include a hidden header login form before the
+            # visible page form. Select visible controls so we submit the actual form.
+            user_field = page.locator('input[name="user_login"]:visible').last
+            pass_field = page.locator('input[name="user_pass"]:visible').last
             if user_field.count() == 0 or pass_field.count() == 0:
-                log("browser_login_form", username_field=user_field.count() > 0,
-                    password_field=pass_field.count() > 0, title=page.title(),
-                    path=urlparse(page.url).path)
-                raise RuntimeError("Browser could not locate TopDJMixes login fields.")
+                log("browser_login_form", username_visible_count=page.locator('input[name="user_login"]:visible').count(),
+                    password_visible_count=page.locator('input[name="user_pass"]:visible').count(),
+                    username_total_count=page.locator('input[name="user_login"]').count(),
+                    password_total_count=page.locator('input[name="user_pass"]').count(),
+                    title=page.title(), path=urlparse(page.url).path)
+                raise RuntimeError("Browser could not locate visible TopDJMixes login fields.")
 
             form = pass_field.locator("xpath=ancestor::form[1]")
+            form_info = form.evaluate("(f) => ({action: f.action, method: f.method, id: f.id, className: String(f.className).slice(0,160)})")
             user_field.fill(USER)
             pass_field.fill(PASSWORD)
-            submit = form.locator('button[type="submit"], input[type="submit"], button:not([type])')
+            submit = form.locator('button[type="submit"]:visible, input[type="submit"]:visible, button:not([type]):visible')
             if submit.count():
-                submit.first.click()
+                submit.last.click()
             else:
-                pass_field.press("Enter")
+                # Native submission respects the form's own submit handler.
+                form.evaluate("(f) => f.requestSubmit()")
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except PlaywrightTimeoutError:
@@ -97,11 +103,20 @@ def authenticate(session: requests.Session):
                 "incorrect password", "invalid username", "invalid password",
                 "username or password is incorrect", "too many login attempts",
             ))
+            login_form_remains = page.locator('input[name="user_login"]:visible').count() > 0
+            logout_visible = page.get_by_text(re.compile(r"\\blog ?out\\b", re.I)).count() > 0
+            auth_cookie_names = sorted({c["name"] for c in context.cookies()
+                                        if c["name"].startswith(("wordpress_logged_in_", "wordpress_sec_"))})
             log("browser_login_result", path=urlparse(page.url).path, title=page.title(),
-                invalid_credentials_marker=invalid,
+                form_action=form_info["action"], form_method=form_info["method"],
+                form_id=form_info["id"], invalid_credentials_marker=invalid,
+                login_form_still_visible=login_form_remains, logout_text_visible=logout_visible,
+                wordpress_auth_cookie_names=auth_cookie_names,
                 cookie_names=sorted({c["name"] for c in context.cookies()}))
             if invalid:
                 raise RuntimeError("TopDJMixes returned a login failure message.")
+            if login_form_remains and not auth_cookie_names and not logout_visible:
+                raise RuntimeError("Login form remained visible and no WordPress authentication cookie appeared; credentials were not authenticated.")
 
             page.goto(sample_url, wait_until="domcontentloaded", timeout=45000)
             try:
