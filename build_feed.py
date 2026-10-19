@@ -225,7 +225,7 @@ def authenticate(session: requests.Session):
                 "username or password is incorrect", "too many login attempts",
             ))
             login_form_remains = page.locator('input[name="user_login"]:visible').count() > 0
-            logout_visible = page.get_by_text(re.compile(r"\\blog ?out\\b", re.I)).count() > 0
+            logout_visible = page.get_by_text(re.compile(r"\blog ?out\b", re.I)).count() > 0
             auth_cookie_names = sorted({c["name"] for c in context.cookies()
                                         if c["name"].startswith(("wordpress_logged_in_", "wordpress_sec_"))})
             log("browser_login_result", path=urlparse(page.url).path, title=page.title(),
@@ -277,7 +277,9 @@ def authenticate(session: requests.Session):
                     route.continue_()
             def request_probe(request):
                 parsed_url = urlparse(request.url)
-                if "admin-ajax.php" in parsed_url.path or "download" in parsed_url.path.lower():
+                # Capture request metadata for the click regardless of endpoint naming.
+                # Never log query strings, cookies, or authorization headers.
+                if len(related_requests) < 60:
                     related_requests.append({"method": request.method, "host": parsed_url.netloc,
                                              "path": parsed_url.path, "resource_type": request.resource_type})
             page.on("request", request_probe)
@@ -285,7 +287,7 @@ def authenticate(session: requests.Session):
             click_error = None
             try:
                 download_button = page.locator("a,button").filter(
-                    has_text=re.compile(r"^\\s*DOWNLOAD\\s*$", re.I)
+                    has_text=re.compile(r"^\s*DOWNLOAD\s*$", re.I)
                 ).first
                 if download_button.count():
                     download_button.click(timeout=7000)
