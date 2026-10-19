@@ -15,6 +15,8 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse, unquote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 BASE = "https://www.topdjmixes.com"
@@ -31,6 +33,55 @@ HEADERS = {
 
 def log(event: str, **fields):
     print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
+
+def configure_retries(session: requests.Session):
+    retry = Retry(
+        total=4, connect=4, read=3, status=4,
+        backoff_factor=1.2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+def validate_audio_url(session: requests.Session, url: str, referer: str = SHOWS_URL):
+    """Validate an MP3 with a one-byte Range request; never fetch the full audio body."""
+    response = None
+    try:
+        response = session.get(
+            url,
+            headers={**HEADERS, "Referer": referer, "Range": "bytes=0-0"},
+            allow_redirects=True, stream=True, timeout=(15, 30),
+        )
+        final_url = response.url
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        content_range = response.headers.get("Content-Range", "")
+        content_length = response.headers.get("Content-Length", "")
+        total = None
+        match = re.search(r"/(\\d+|\\*)$", content_range)
+        if match and match.group(1) != "*":
+            total = int(match.group(1))
+        elif content_length.isdigit() and response.status_code == 200:
+            total = int(content_length)
+        valid = (
+            response.status_code in (200, 206)
+            and (content_type.startswith("audio/") or is_mp3(final_url))
+            and not urlparse(final_url).path.lower().endswith((".html", ".htm"))
+        )
+        return {
+            "valid": valid, "url": final_url, "length": total,
+            "status": response.status_code, "content_type": content_type,
+            "content_range": content_range,
+        }
+    except requests.RequestException as exc:
+        return {"valid": False, "url": url, "length": None,
+                "status": None, "error": type(exc).__name__}
+    finally:
+        if response is not None:
+            response.close()
 
 def absolute(url: str, base: str = BASE) -> str:
     return urljoin(base, html.unescape(url.strip()))
@@ -296,7 +347,7 @@ def parse_date(soup: BeautifulSoup):
     return datetime.now(timezone.utc)
 
 def fetch_episode(session, url, fallback_title):
-    r = session.get(url, headers={"Referer": SHOWS_URL}, timeout=45)
+    # Page fetches may be rate-limited; the session uses bounded retries for transient 5xx/429 responses.\n    r = session.get(url, headers={"Referer": SHOWS_URL}, timeout=45)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else fallback_title
@@ -329,14 +380,24 @@ def fetch_episode(session, url, fallback_title):
             except requests.RequestException:
                 continue
     if not audio:
+        log("episode_audio_missing", page=url, title=title)
         return None
+    # A discovered URL is not enough: verify it is a playable audio response using
+    # a one-byte range request. This deliberately does not download the MP3.
+    checked = validate_audio_url(session, audio, referer=r.url)
+    if not checked.get("valid"):
+        log("episode_audio_invalid", page=url, audio_host=urlparse(audio).netloc,
+            status=checked.get("status"), content_type=checked.get("content_type"),
+            error=checked.get("error"))
+        return None
+    audio = checked["url"]
     description = ""
     for selector in ("meta[name='description']", "meta[property='og:description']"):
         node = soup.select_one(selector)
         if node and node.get("content"):
             description = clean_text(node["content"])
             break
-    return {"title": title, "page": url, "audio": audio, "date": parse_date(soup), "description": description}
+    return {"title": title, "page": url, "audio": audio, "audio_length": checked.get("length"), "date": parse_date(soup), "description": description}
 
 def xml_escape(s):
     return html.escape(str(s or ""), quote=True)
@@ -362,7 +423,7 @@ def write_rss(items):
             f'<guid isPermaLink="true">{xml_escape(item["page"])}</guid>',
             f'<pubDate>{format_datetime(item["date"], usegmt=True)}</pubDate>',
             f'<description>{xml_escape(item["description"] or item["title"])}</description>',
-            f'<enclosure url="{xml_escape(item["audio"])}" length="0" type="audio/mpeg"/>',
+            f'<enclosure url="{xml_escape(item["audio"])}" length="{int(item.get("audio_length") or 0)}" type="audio/mpeg"/>',
             '<itunes:explicit>no</itunes:explicit>',
             '</item>',
         ])
@@ -374,6 +435,7 @@ def main():
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD GitHub Actions secrets are required.")
     session = requests.Session()
     session.headers.update(HEADERS)
+    configure_retries(session)
     probe_known_mp3(session)
     listing = authenticate(session)
     catalog_soup = BeautifulSoup(listing.text, "html.parser")
