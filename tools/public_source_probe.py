@@ -148,6 +148,27 @@ try:
                                             "audio": safe_url(enc.attrib.get("url", "")) if enc is not None else None,
                                             "pubDate": item.findtext("pubDate")})
                     emit("official_episode_match", feed=safe_url(f.url), matches=matches[:10])
+                    # Verify the newest matching episode with a one-byte Range request only.
+                    for match in matches:
+                        audio = match.get("audio") or {}
+                        audio_url = audio.get("url_if_no_query")
+                        if match.get("title", "").endswith("#228") and audio_url:
+                            try:
+                                probe = S.get(audio_url, headers={"Range": "bytes=0-0", "Accept": "audio/mpeg"},
+                                              timeout=30, allow_redirects=True, stream=True)
+                                emit("official_mp3_range_probe", title=match["title"],
+                                     status=probe.status_code,
+                                     final=safe_url(probe.url),
+                                     content_type=probe.headers.get("content-type", ""),
+                                     content_range=probe.headers.get("content-range", ""),
+                                     content_length=probe.headers.get("content-length", ""),
+                                     accept_ranges=probe.headers.get("accept-ranges", ""),
+                                     range_requested="bytes=0-0",
+                                     redirects=len(probe.history))
+                                probe.close()
+                            except Exception as exc:
+                                emit("official_mp3_range_probe_error", title=match.get("title", ""),
+                                     error=type(exc).__name__, detail=str(exc)[:160])
                 except Exception as e:
                     emit("official_feed_parse_error", error=type(e).__name__)
 except Exception as e:
