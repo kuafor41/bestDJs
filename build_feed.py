@@ -173,7 +173,17 @@ def authenticate(session: requests.Session):
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
         page = context.new_page()
         try:
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+            # The host may briefly return 503 during bursts. Retry the login page
+            # slowly and stop after a small number of attempts rather than hammering it.
+            for login_attempt in range(1, 4):
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                if "503 service unavailable" not in page.title().lower():
+                    break
+                log("login_page_unavailable", attempt=login_attempt, title=page.title())
+                if login_attempt < 3:
+                    page.wait_for_timeout(20000)
+            if "503 service unavailable" in page.title().lower():
+                raise RuntimeError("TopDJMixes login page continued returning 503 after slow retries.")
             # Some WordPress themes include a hidden header login form before the
             # visible page form. Select visible controls so we submit the actual form.
             user_field = page.locator('input[name="user_login"]:visible').last
@@ -347,7 +357,8 @@ def parse_date(soup: BeautifulSoup):
     return datetime.now(timezone.utc)
 
 def fetch_episode(session, url, fallback_title):
-    # Page fetches may be rate-limited; the session uses bounded retries for transient 5xx/429 responses.\n    r = session.get(url, headers={"Referer": SHOWS_URL}, timeout=45)
+    # Page fetches are deliberately sequential; the caller pauses between episode requests.
+    r = session.get(url, headers={"Referer": SHOWS_URL}, timeout=45)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else fallback_title
@@ -473,7 +484,7 @@ def main():
                 log("show_progress", checked=show_index, episode_pages=len(episode_links))
         except (requests.RequestException, ValueError) as exc:
             log("show_error", url=show_url, error=type(exc).__name__)
-        time.sleep(0.08)
+        time.sleep(float(os.environ.get("REQUEST_DELAY_SECONDS", "2.5")))
     log("episode_pages_discovered", count=len(episode_links), sample=list(episode_links.items())[:5])
     if not episode_links:
         raise RuntimeError("No episode pages were discovered inside the mixshow archive pages.")
@@ -492,7 +503,7 @@ def main():
             log("progress", checked=index, found=len(episodes), errors=errors)
         if len(episodes) >= MAX_EPISODES:
             break
-        time.sleep(0.15)
+        time.sleep(float(os.environ.get("REQUEST_DELAY_SECONDS", "2.5")))
     if not episodes:
         raise RuntimeError("Episode pages were discovered, but no direct MP3 URLs were exposed to the crawler. Check login/download authorization or the Download-button redirect.")
     episodes.sort(key=lambda x: x["date"], reverse=True)
