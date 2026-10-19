@@ -1,0 +1,78 @@
+name: Update bestDJs RSS
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */12 * * *"
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bestdjs-rss-update
+  cancel-in-progress: false
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade requests beautifulsoup4
+
+      - name: Validate secrets are present
+        env:
+          SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+        run: |
+          test -n "$SOURCE_USERNAME" || { echo "::error::Missing SOURCE_USERNAME secret"; exit 1; }
+          test -n "$SOURCE_PASSWORD" || { echo "::error::Missing SOURCE_PASSWORD secret"; exit 1; }
+          echo "Required secrets are configured (values are not displayed)."
+
+      - name: Build authenticated RSS feed
+        env:
+          SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+          MAX_EPISODES: "100"
+        run: python build_feed.py
+
+      - name: Validate generated RSS
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          p = Path("public/rss.xml")
+          root = ET.parse(p).getroot()
+          items = root.findall("./channel/item")
+          assert items, "RSS contains no episodes"
+          for item in items:
+              enclosure = item.find("enclosure")
+              assert enclosure is not None and enclosure.get("type") == "audio/mpeg", "Missing MP3 enclosure"
+              assert enclosure.get("url", "").lower().split("?", 1)[0].endswith(".mp3"), "Enclosure is not a direct MP3 URL"
+          print(f"RSS validation passed: {len(items)} episodes")
+          PY
+
+      - name: Commit RSS when changed
+        run: |
+          if git diff --quiet -- public/rss.xml; then
+            echo "RSS unchanged; no commit needed."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add public/rss.xml
+            git commit -m "Update generated podcast RSS"
+            git push
+          fi
