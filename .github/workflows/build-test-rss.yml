@@ -59,7 +59,8 @@ jobs:
           PY
       - name: Commit test RSS only
         run: |
-          if git diff --quiet -- public/test-rss.xml; then
+          # git diff does not detect an untracked output file; inspect the worktree instead.
+          if [ -z "$(git status --porcelain -- public/test-rss.xml)" ]; then
             echo "Test RSS unchanged."
           else
             git config user.name "github-actions[bot]"

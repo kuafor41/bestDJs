@@ -579,6 +579,7 @@ def validate_feed(items):
          sorted_newest_to_oldest=True)
 
 
+# Test-feed generation is isolated from the production RSS.
 def main():
     if not USER or not PASSWORD:
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD secrets are required.")
