@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
+from http.cookies import SimpleCookie
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,8 +23,8 @@ BASE = core.BASE
 REST = BASE + "/wp-json/wp/v2/posts"
 OUT = Path("public/test-rss.xml")
 TARGET_ITEMS = 50
-REST_PAGES_LIMIT = 5
-CANDIDATES_TARGET = 100
+REST_PAGES_LIMIT = 4
+CANDIDATES_TARGET = 75
 PER_PAGE = 100
 PAUSE = float(__import__("os").environ.get("TEST_FEED_REQUEST_DELAY", "0.2"))
 USER = core.USER
@@ -279,56 +280,233 @@ def inspect_candidates(session: requests.Session, posts):
     return candidates
 
 
-def resolve_audio(session: requests.Session, item):
-    # This is the exact endpoint pattern that was observed from clicking the site's own
-    # a.wpdm-download-link.download-on-click control. Use Range=0-0 so only one byte can be read.
-    endpoint = urljoin(BASE, "/download/" + item["slug"].strip("/") + "/")
-    response = None
+def transfer_cookies(context, session):
+    for cookie in context.cookies():
+        if "topdjmixes.com" in cookie.get("domain", ""):
+            session.cookies.set(cookie["name"], cookie["value"],
+                                domain=cookie["domain"], path=cookie.get("path", "/"))
+
+
+def login_in_browser(page, context, session, PlaywrightTimeoutError):
+    """Sign in through the site's normal ARM form, allowing its JS fields to initialize."""
+    login_url = core.LOGIN_URL
+    for attempt in range(1, 4):
+        page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+        if "503 service unavailable" not in page.title().lower():
+            break
+        emit("login_page_unavailable", attempt=attempt, title=page.title())
+        if attempt < 3:
+            page.wait_for_timeout(15000)
     try:
-        response = session.get(
-            endpoint,
-            headers={**core.HEADERS, "Referer": item["page"], "Range": "bytes=0-0"},
-            allow_redirects=True, stream=True, timeout=(15, 35),
-        )
-        final_url = response.url
-        parsed = urlparse(final_url)
-        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        content_range = response.headers.get("Content-Range", "")
-        total = None
-        match = re.search(r"/(\d+|\*)$", content_range)
-        if match and match.group(1) != "*":
-            total = int(match.group(1))
-        if response.status_code == 206:
-            first_byte = next(response.iter_content(1), b"")
-            got_byte = len(first_byte) == 1
-        else:
-            got_byte = response.status_code == 200
-        valid = (
-            got_byte and response.status_code in (200, 206)
-            and (content_type.startswith("audio/") or core.is_mp3(final_url))
-            and core.is_mp3(final_url)
-            and not parsed.path.lower().endswith((".html", ".htm"))
-        )
-        if not total and response.status_code == 200:
-            length = response.headers.get("Content-Length", "")
-            if length.isdigit():
-                total = int(length)
-        emit("episode_audio_range_check", title=item["title"],
-             page=safe_url(item["page"]), endpoint_path=urlparse(endpoint).path,
-             final_host=parsed.netloc, final_path=parsed.path, final_query_present=bool(parsed.query),
-             status=response.status_code, content_type=content_type,
-             content_range=content_range, total_bytes=total,
-             range_requested="bytes=0-0", redirect_count=len(response.history), valid=valid)
-        if valid:
-            return final_url, total
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(800)
+
+    initial_body = core.clean_text(page.locator("body").inner_text(timeout=10000))
+    if "spam detected" in initial_body.lower():
+        raise RuntimeError("TopDJMixes shows Spam detected before form submission; no credentials were submitted.")
+
+    user_field = page.locator('input[name="user_login"]:visible').last
+    pass_field = page.locator('input[name="user_pass"]:visible').last
+    for _ in range(9):
+        if user_field.count() and pass_field.count():
+            break
+        page.wait_for_timeout(5000)
+    if not user_field.count() or not pass_field.count():
+        body = core.clean_text(page.locator("body").inner_text(timeout=10000))
+        emit("login_form_missing", title=page.title(), path=urlparse(page.url).path,
+             body_excerpt=body[:350], credentials_submitted=False)
+        raise RuntimeError("TopDJMixes did not present its normal login form; stopped before submitting credentials.")
+
+    form = pass_field.locator("xpath=ancestor::form[1]")
+    try:
+        form.locator('input#arm_form_submission_key[name]:not([name=""])').wait_for(
+            state="attached", timeout=15000)
+    except PlaywrightTimeoutError:
+        emit("login_form_not_initialized", title=page.title(), form_id=form.get_attribute("id") or "")
+        raise RuntimeError("ARM Membership did not initialize its dynamic submission key; no login was submitted.")
+
+    honeypot = form.locator('input[name="arm_filter_input"]')
+    if honeypot.count() and (honeypot.first.input_value() or "").strip():
+        raise RuntimeError("ARM honeypot is not empty; refusing to submit the login form.")
+
+    user_field.click()
+    user_field.press_sequentially(USER, delay=30)
+    pass_field.click()
+    pass_field.press_sequentially(PASSWORD, delay=30)
+    page.wait_for_timeout(400)
+    submit = form.locator('button[type="submit"]:visible, input[type="submit"]:visible, button:not([type]):visible')
+    if not submit.count():
+        raise RuntimeError("TopDJMixes login submit control is missing; no login request was made.")
+    submit.last.click()
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(1000)
+
+    body = core.clean_text(page.locator("body").inner_text(timeout=10000))
+    lowered = body.lower()
+    auth_cookies = sorted({c["name"] for c in context.cookies()
+                           if c["name"].startswith(("wordpress_logged_in_", "wordpress_sec_"))})
+    logged_out_visible = page.get_by_text(re.compile(r"\blog ?out\b", re.I)).count() > 0
+    login_form_visible = page.locator('input[name="user_login"]:visible').count() > 0
+    emit("test_feed_login_result", title=page.title(), path=urlparse(page.url).path,
+         auth_cookie_names=auth_cookies, logged_out_visible=logged_out_visible,
+         login_form_visible=login_form_visible,
+         spam_detected="spam detected" in lowered,
+         invalid_credentials_marker=any(marker in lowered for marker in (
+             "incorrect password", "invalid username", "invalid password",
+             "username or password is incorrect", "too many login attempts")))
+    if "spam detected" in lowered:
+        raise RuntimeError("TopDJMixes rejected this one normal login submission as Spam detected; stopping.")
+    if not auth_cookies or (login_form_visible and not logged_out_visible):
+        raise RuntimeError("TopDJMixes did not confirm an authenticated session.")
+    transfer_cookies(context, session)
+
+
+def click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError):
+    """Click the actual episode Download button and inspect redirects without fetching the MP3 body."""
+    try:
+        page.goto(item["page"], wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        emit("episode_browser_navigation_error", title=item["title"], page=safe_url(item["page"]),
+             error=type(exc).__name__)
         return None, None
-    except requests.RequestException as exc:
-        emit("episode_audio_error", title=item["title"], page=safe_url(item["page"]),
-             endpoint_path=urlparse(endpoint).path, error=type(exc).__name__)
+    try:
+        page.locator("a.wpdm-download-link.download-on-click:visible").wait_for(
+            state="attached", timeout=12000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(350)
+    body = core.clean_text(page.locator("body").inner_text(timeout=10000)).lower()
+    if "please login to download or create a free account" in body:
+        emit("episode_browser_login_gate", title=item["title"], page=safe_url(item["page"]))
         return None, None
+
+    button = page.locator("a.wpdm-download-link.download-on-click:visible").first
+    if not button.count():
+        emit("episode_download_button_missing", title=item["title"], page=safe_url(item["page"]))
+        return None, None
+
+    captured = []
+    redirect_trace = []
+    def route_download(route):
+        request = route.request
+        parsed = urlparse(request.url)
+        if parsed.netloc.lower() in ("www.topdjmixes.com", "topdjmixes.com") and parsed.path.startswith("/download/"):
+            current_url = request.url
+            previous_url = request.url
+            headers = dict(request.headers)
+            # Ensure the authenticated browser cookies are carried into the individual
+            # redirect-header requests, including HttpOnly cookies.
+            try:
+                browser_cookies = context.cookies("https://www.topdjmixes.com")
+                cookie_values = {c["name"]: c["value"] for c in browser_cookies}
+                existing = headers.get("cookie", headers.get("Cookie", ""))
+                for pair in existing.split(";"):
+                    if "=" in pair:
+                        name, value = pair.split("=", 1)
+                        cookie_values.setdefault(name.strip(), value.strip())
+                if cookie_values:
+                    headers["cookie"] = "; ".join(f"{k}={v}" for k, v in cookie_values.items())
+            except Exception:
+                pass
+
+            for hop in range(1, 7):
+                if core.is_mp3(current_url):
+                    captured.append(current_url)
+                    break
+                response = None
+                try:
+                    hop_headers = dict(headers)
+                    if previous_url:
+                        hop_headers["referer"] = previous_url
+                    response = route.fetch(url=current_url, headers=hop_headers,
+                                           max_redirects=0, timeout=15000)
+                    status = response.status
+                    response_headers = response.headers
+                    location = response_headers.get("location", "")
+                    content_type = response_headers.get("content-type", "").split(";", 1)[0].lower()
+                    redirect_trace.append({"hop": hop, "status": status, "url": safe_url(response.url),
+                                           "content_type": content_type, "location_present": bool(location)})
+                    set_cookie = response_headers.get("set-cookie", "")
+                    if set_cookie:
+                        try:
+                            jar = SimpleCookie()
+                            jar.load(set_cookie)
+                            values = {}
+                            existing = hop_headers.get("cookie", "")
+                            for pair in existing.split(";"):
+                                if "=" in pair:
+                                    n, v = pair.split("=", 1)
+                                    values[n.strip()] = v.strip()
+                            for n, morsel in jar.items():
+                                values[n] = morsel.value
+                            headers["cookie"] = "; ".join(f"{n}={v}" for n, v in values.items())
+                        except Exception:
+                            pass
+                    if status in (301, 302, 303, 307, 308) and location:
+                        next_url = urljoin(response.url, location)
+                        if core.is_mp3(next_url):
+                            captured.append(next_url)
+                            break
+                        previous_url, current_url = response.url, next_url
+                        continue
+                    # The last URL must arrive in a Location header before this code continues.
+                    # Do not fetch a response body served at a non-MP3 URL.
+                    break
+                except Exception as exc:
+                    redirect_trace.append({"hop": hop, "error": type(exc).__name__,
+                                           "url": safe_url(current_url)})
+                    break
+                finally:
+                    if response is not None:
+                        try:
+                            response.dispose()
+                        except Exception:
+                            pass
+            route.abort()
+            return
+        if core.is_mp3(request.url) or parsed.netloc.lower() == "files.topdjmixes.com":
+            captured.append(request.url)
+            route.abort()
+            return
+        route.continue_()
+
+    click_error = None
+    context.route("**/*", route_download)
+    try:
+        button.click(timeout=10000)
+        page.wait_for_timeout(500)
+    except Exception as exc:
+        # Aborting the download navigation can surface as an expected click/navigation error.
+        click_error = type(exc).__name__
     finally:
-        if response is not None:
-            response.close()
+        try:
+            context.unroute("**/*", route_download)
+        except Exception:
+            pass
+
+    unique_urls = list(dict.fromkeys(captured))
+    if not unique_urls:
+        emit("episode_download_click_no_mp3", title=item["title"], page=safe_url(item["page"]),
+             click_error=click_error, redirect_trace=redirect_trace[:8])
+        return None, None
+    audio_url = unique_urls[0]
+    checked = core.validate_audio_url(session, audio_url, referer=item["page"])
+    final = urlparse(checked.get("url", audio_url))
+    emit("episode_audio_range_check", title=item["title"], page=safe_url(item["page"]),
+         audio_url=safe_url(audio_url), valid=checked.get("valid"),
+         status=checked.get("status"), content_type=checked.get("content_type"),
+         content_range=checked.get("content_range"), length=checked.get("length"),
+         final_host=final.netloc, final_path=final.path,
+         final_query_present=bool(final.query), click_error=click_error,
+         redirect_trace=redirect_trace[:8])
+    if not checked.get("valid") or not core.is_mp3(checked.get("url", audio_url)):
+        return None, None
+    return checked["url"], checked.get("length")
 
 
 def xml_escape(value):
@@ -404,48 +582,58 @@ def validate_feed(items):
 def main():
     if not USER or not PASSWORD:
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD secrets are required.")
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    except ImportError as exc:
+        raise RuntimeError("Playwright is required for authenticated Download-button clicks.") from exc
+
     session = requests.Session()
     session.headers.update(core.HEADERS)
     core.configure_retries(session)
 
-    # Reuse the proven normal site login; authenticate() clicks the site Download button once
-    # and confirms that the Download endpoint resolves to an MP3 without reading its body.
-    listing, _browser_catalog = core.authenticate(session)
-    emit("authenticated_session_ready", listing_status=listing.status_code,
-         listing_path=urlparse(listing.url).path)
+    # Keep the authenticated browser open for every real per-episode Download click.
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(user_agent=core.HEADERS["User-Agent"], accept_downloads=False)
+        page = context.new_page()
+        try:
+            login_in_browser(page, context, session, PlaywrightTimeoutError)
+            posts = wordpress_posts(session)
+            emit("wordpress_post_candidates", total=len(posts))
+            candidates = inspect_candidates(session, posts)
+            if len(candidates) < TARGET_ITEMS:
+                raise RuntimeError(
+                    f"Only {len(candidates)} TopDJMixes Download-enabled episode pages were found; need {TARGET_ITEMS}.")
 
-    posts = wordpress_posts(session)
-    emit("wordpress_post_candidates", total=len(posts))
-    candidates = inspect_candidates(session, posts)
-    if len(candidates) < TARGET_ITEMS:
-        raise RuntimeError(f"Only {len(candidates)} TopDJMixes Download-enabled episode pages were found; need {TARGET_ITEMS}.")
-
-    candidates.sort(key=lambda item: item["date"], reverse=True)
-    result = []
-    failures = 0
-    for item in candidates:
-        audio, length = resolve_audio(session, item)
-        if audio:
-            item["audio"] = audio
-            item["audio_length"] = length or 0
-            result.append(item)
-        else:
-            failures += 1
-        if len(result) >= TARGET_ITEMS:
-            break
-        time.sleep(PAUSE)
-    if len(result) < TARGET_ITEMS:
-        raise RuntimeError(f"Only {len(result)} episodes yielded direct MP3s; need {TARGET_ITEMS}.")
-    result.sort(key=lambda item: item["date"], reverse=True)
-    write_feed(result)
-    validate_feed(result)
-    emit("test_feed_written", file=str(OUT), episodes=len(result),
-         missing_covers=sum(1 for item in result if not item.get("cover")),
-         missing_description=sum(1 for item in result if not item.get("description")),
-         audio_failures=failures,
-         newest_title=result[0]["title"], newest_date=result[0]["date"].isoformat(),
-         newest_audio_host=urlparse(result[0]["audio"]).netloc)
-
+            candidates.sort(key=lambda item: item["date"], reverse=True)
+            result = []
+            click_failures = 0
+            for item in candidates:
+                audio, length = click_download_and_resolve_audio(
+                    page, context, session, item, PlaywrightTimeoutError)
+                if audio:
+                    item["audio"] = audio
+                    item["audio_length"] = length or 0
+                    result.append(item)
+                else:
+                    click_failures += 1
+                if len(result) >= TARGET_ITEMS:
+                    break
+                time.sleep(PAUSE)
+            if len(result) < TARGET_ITEMS:
+                raise RuntimeError(
+                    f"Only {len(result)} episodes yielded direct MP3 URLs from actual Download-button clicks; need {TARGET_ITEMS}.")
+            result.sort(key=lambda item: item["date"], reverse=True)
+            write_feed(result)
+            validate_feed(result)
+            emit("test_feed_written", file=str(OUT), episodes=len(result),
+                 missing_covers=sum(1 for item in result if not item.get("cover")),
+                 missing_description=sum(1 for item in result if not item.get("description")),
+                 download_click_failures=click_failures,
+                 newest_title=result[0]["title"], newest_date=result[0]["date"].isoformat(),
+                 newest_audio_host=urlparse(result[0]["audio"]).netloc)
+        finally:
+            browser.close()
 
 if __name__ == "__main__":
     try:
