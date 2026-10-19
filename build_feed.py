@@ -56,6 +56,59 @@ def form_payload(form):
         payload[name] = item.get("value", "")
     return payload
 
+KNOWN_MP3_URL = "https://files.topdjmixes.com/Resident/Hernan%20Cattaneo%20-%20Resident%20Episode%20805_VPtDbeR7vVpTSTL.mp3"
+KNOWN_EPISODE_URL = BASE + "/resident-805/"
+
+def probe_known_mp3(session: requests.Session):
+    """Check the user's known-working MP3 URL from the GitHub runner without downloading the whole file."""
+    safe_fields = {}
+    try:
+        r = session.get(KNOWN_MP3_URL, headers={**HEADERS, "Range": "bytes=0-1023"},
+                        allow_redirects=True, stream=True, timeout=35)
+        final = urlparse(r.url)
+        safe_fields = {
+            "status": r.status_code,
+            "final_host": final.netloc,
+            "final_path": final.path,
+            "redirect_count": len(r.history),
+            "content_type": r.headers.get("Content-Type", ""),
+            "content_length": r.headers.get("Content-Length", ""),
+            "content_range": r.headers.get("Content-Range", ""),
+            "accept_ranges": r.headers.get("Accept-Ranges", ""),
+            "range_requested": "bytes=0-1023",
+        }
+        # Only read bytes when the server explicitly honored the small range request.
+        if r.status_code == 206:
+            chunk = next(r.iter_content(1024), b"")
+            safe_fields["sample_bytes"] = len(chunk)
+            safe_fields["sample_hex"] = chunk[:16].hex()
+        r.close()
+        safe_fields["looks_like_mp3_response"] = (
+            r.status_code in (200, 206) and
+            ("audio/" in safe_fields["content_type"].lower() or ".mp3" in final.path.lower())
+        )
+        log("known_mp3_probe", **safe_fields)
+    except requests.RequestException as exc:
+        log("known_mp3_probe", error=type(exc).__name__, detail=str(exc)[:220])
+
+    try:
+        page = session.get(KNOWN_EPISODE_URL, headers=HEADERS, timeout=35)
+        soup = BeautifulSoup(page.text, "html.parser")
+        body = clean_text(soup.get_text(" ", strip=True)).lower()
+        links = []
+        for a in soup.select("a[href]"):
+            href = absolute(a.get("href", ""), page.url)
+            if "download" in (clean_text(a.get_text(" ", strip=True)) + " " + href).lower():
+                p = urlparse(href)
+                links.append({"text": clean_text(a.get_text(" ", strip=True))[:70],
+                              "host": p.netloc, "path": p.path})
+        log("known_episode_page_probe", status=page.status_code,
+            final_path=urlparse(page.url).path, title=clean_text(soup.title.get_text(" ", strip=True)) if soup.title else "",
+            login_gate="please login to download or create a free account" in body,
+            download_links=links[:10], html_length=len(page.text))
+    except requests.RequestException as exc:
+        log("known_episode_page_probe", error=type(exc).__name__, detail=str(exc)[:220])
+
 def authenticate(session: requests.Session):
     """Use Chromium for the membership login, then share its cookies with requests."""
     try:
@@ -314,6 +367,7 @@ def main():
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD GitHub Actions secrets are required.")
     session = requests.Session()
     session.headers.update(HEADERS)
+    probe_known_mp3(session)
     listing = authenticate(session)
     catalog_soup = BeautifulSoup(listing.text, "html.parser")
     show_links = extract_mixshow_links(catalog_soup, listing.url)
