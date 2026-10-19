@@ -276,18 +276,39 @@ def authenticate(session: requests.Session):
         cookie_names=sorted({c.name for c in session.cookies}))
     if gate:
         raise RuntimeError("Browser login appeared to complete, but transferred cookies do not unlock Download.")
+    # Inspect the catalogue in the same authenticated browser that passed the episode gate.
+    page.goto(SHOWS_URL, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(1000)
+    browser_catalog_html = page.content()
+    browser_catalog_soup = BeautifulSoup(browser_catalog_html, "html.parser")
+    anchor_samples = []
+    for a in browser_catalog_soup.select("a[href]"):
+        label = clean_text(a.get_text(" ", strip=True))
+        href = absolute(a.get("href", ""), page.url)
+        if label and any(term in label.lower() for term in ("future sound", "resident", "anjunadeep", "state of trance", "mix show")):
+            parsed = urlparse(href)
+            anchor_samples.append({"text": label[:70], "host": parsed.netloc, "path": parsed.path})
+        if len(anchor_samples) >= 25:
+            break
+    log("browser_catalog_probe", path=urlparse(page.url).path,
+        html_length=len(browser_catalog_html), anchors=len(browser_catalog_soup.select("a[href]")),
+        show_anchor_samples=anchor_samples)
     listing = session.get(SHOWS_URL, headers={"Referer": sample_url}, timeout=45)
     listing.raise_for_status()
     log("listing_fetch", status=listing.status_code, final_path=urlparse(listing.url).path,
         html_length=len(listing.text))
-    return listing
+    return listing, browser_catalog_html
 
 def extract_mixshow_links(soup: BeautifulSoup, page_url: str):
-    """Find mixshow archive links such as /future-sound-of-egypt/."""
+    """Find mixshow archives from root-level slugs or nested directory links."""
     excluded = {
-        "mix-shows", "login", "register", "news", "music-player", "linklists",
+        "mix-shows", "mixshow", "shows", "login", "register", "news", "music-player", "linklists",
         "schedule", "contact", "privacy-policy", "terms", "terms-conditions", "gdpr", "my-account",
-        "wp-admin", "wp-content", "wp-json", "category", "tag", "page", "author",
+        "membership-account", "wp-admin", "wp-content", "wp-json", "category", "tag", "page", "author",
         "search", "feed", "lost-password",
     }
     found = {}
@@ -297,16 +318,21 @@ def extract_mixshow_links(soup: BeautifulSoup, page_url: str):
         if parsed.netloc.lower() not in ("www.topdjmixes.com", "topdjmixes.com"):
             continue
         parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) != 1:
+        if not parts:
             continue
-        slug = parts[0].lower()
-        if slug in excluded or re.search(r"\\d", slug) or slug.startswith(("wp-", "page-")):
+        # Most archives use /show-name/, but support /mix-shows/show-name/ too.
+        if len(parts) == 1:
+            slug = parts[0].lower()
+        elif len(parts) == 2 and parts[0].lower() in ("mix-shows", "mixshow", "shows"):
+            slug = parts[1].lower()
+        else:
+            continue
+        if slug in excluded or re.search(r"-\d+$", slug) or slug.startswith(("wp-", "page-")):
             continue
         title = clean_text(a.get_text(" ", strip=True)) or clean_text(a.get("title", ""))
         if title and len(title) > 1:
             found[href.split("#")[0].rstrip("/") + "/"] = title
     return found
-
 def extract_show_links(soup: BeautifulSoup, page_url: str):
     found = {}
     for a in soup.select("a[href]"):
@@ -448,9 +474,18 @@ def main():
     session.headers.update(HEADERS)
     configure_retries(session)
     probe_known_mp3(session)
-    listing = authenticate(session)
+    listing, browser_catalog_html = authenticate(session)
+    # Prefer catalogue links captured from the authenticated browser, then merge HTTP links.
+    browser_soup = BeautifulSoup(browser_catalog_html, "html.parser")
     catalog_soup = BeautifulSoup(listing.text, "html.parser")
-    show_links = extract_mixshow_links(catalog_soup, listing.url)
+    show_links = extract_mixshow_links(browser_soup, SHOWS_URL)
+    browser_show_count = len(show_links)
+    if len(show_links) < 5:
+        http_show_links = extract_mixshow_links(catalog_soup, listing.url)
+        show_links.update({u: t for u, t in http_show_links.items() if u not in show_links})
+    log("catalog_parser_probe", browser_show_count=browser_show_count,
+        http_show_count=len(extract_mixshow_links(catalog_soup, listing.url)),
+        browser_anchor_count=len(browser_soup.select("a[href]")))
     # The catalog body can be JS-rendered or sparse in plain HTTP responses. The login
     # page footer contains a second directory of mixshow links, so use it as a fallback.
     if len(show_links) < 5:
