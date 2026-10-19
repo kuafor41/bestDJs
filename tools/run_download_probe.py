@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run only the authenticated TopDJMixes Download-button probe; do not write RSS."""
+"""Run one authenticated TopDJMixes Download-button probe; never write or validate the RSS feed."""
 import requests
 import sys
 from pathlib import Path

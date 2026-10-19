@@ -148,13 +148,29 @@ def authenticate(session: requests.Session):
             # visible page form. Select visible controls so we submit the actual form.
             user_field = page.locator('input[name="user_login"]:visible').last
             pass_field = page.locator('input[name="user_pass"]:visible').last
+            # A Cloudflare/security interstitial can temporarily replace the login form.
+            # Wait for the normal login UI; do not submit anything while it is absent.
+            for form_wait in range(1, 10):
+                if user_field.count() > 0 and pass_field.count() > 0:
+                    break
+                if form_wait < 9:
+                    page.wait_for_timeout(5000)
             if user_field.count() == 0 or pass_field.count() == 0:
+                challenge_body = clean_text(page.locator("body").inner_text(timeout=10000))
+                challenge_markers = {
+                    "one_moment": "one moment, please" in challenge_body.lower(),
+                    "captcha": "captcha" in challenge_body.lower(),
+                    "verify": "verify you are human" in challenge_body.lower(),
+                    "cloudflare": "cloudflare" in challenge_body.lower(),
+                }
                 log("browser_login_form", username_visible_count=page.locator('input[name="user_login"]:visible').count(),
                     password_visible_count=page.locator('input[name="user_pass"]:visible').count(),
                     username_total_count=page.locator('input[name="user_login"]').count(),
                     password_total_count=page.locator('input[name="user_pass"]').count(),
-                    title=page.title(), path=urlparse(page.url).path)
-                raise RuntimeError("Browser could not locate visible TopDJMixes login fields.")
+                    title=page.title(), path=urlparse(page.url).path,
+                    challenge_markers=challenge_markers, body_excerpt=challenge_body[:450],
+                    credentials_submitted=False)
+                raise RuntimeError("TopDJMixes did not expose its normal login form after waiting; stopped before submitting credentials.")
 
             form = pass_field.locator("xpath=ancestor::form[1]")
             # ARM Membership adds this key dynamically and refreshes its nonce by AJAX.
@@ -351,8 +367,8 @@ def authenticate(session: requests.Session):
                     if len(body_text) > 500000:
                         continue
                     body_text = body_text.replace("\\/", "/").replace("\\u0026", "&")
-                    for raw in re.findall(r'''[^\\s"'<>]+\\.mp3(?:\\?[^\\s"'<>]*)?''', body_text, re.I):
-                        raw = html.unescape(raw).strip(" \\t\\r\\n\\\"'()[]{}<>,;")
+                    for raw in re.findall(r'''[^\s"'<>]+\.mp3(?:\?[^\s"'<>]*)?''', body_text, re.I):
+                        raw = html.unescape(raw).strip(" \t\r\n\"'()[]{}<>,;")
                         if raw.startswith("//"):
                             raw = "https:" + raw
                         candidate = absolute(raw, response.url)
@@ -366,7 +382,11 @@ def authenticate(session: requests.Session):
                 ".map(a => {const u=new URL(a.href,location.href); return {text:(a.innerText||'').trim().slice(0,80),"
                 "host:u.host,path:u.pathname,query_present:!!u.search,url_if_no_query:u.search?'':u.href};}).slice(0,20)"
             )
-            finally_block_marker = None
+            for link in post_click_links:
+                link_url = link.get("url_if_no_query")
+                if link_url and is_mp3(link_url):
+                    audio_candidates.append(link_url)
+            audio_candidates = list(dict.fromkeys(audio_candidates))
             context.unroute("**/*", route_probe)
             page.remove_listener("request", request_probe)
             page.remove_listener("response", response_probe)
