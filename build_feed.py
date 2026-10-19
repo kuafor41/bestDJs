@@ -270,9 +270,13 @@ def authenticate(session: requests.Session):
             intercepted_audio = []
             related_requests = []
             related_responses = []
+            related_response_objects = []
+            audio_candidates = []
+            click_target = None
             def route_probe(route):
                 request_url = route.request.url
                 parsed_url = urlparse(request_url)
+                # Abort audio requests before the browser can fetch the MP3 body.
                 if is_mp3(request_url) or parsed_url.netloc.lower() == "files.topdjmixes.com":
                     intercepted_audio.append(request_url)
                     route.abort()
@@ -280,45 +284,102 @@ def authenticate(session: requests.Session):
                     route.continue_()
             def request_probe(request):
                 parsed_url = urlparse(request.url)
-                # Capture request metadata for the click regardless of endpoint naming.
-                # Never log query strings, cookies, or authorization headers.
-                if len(related_requests) < 60:
+                # Capture request metadata for this click only; never log cookies or headers.
+                if len(related_requests) < 100:
                     related_requests.append({"method": request.method, "host": parsed_url.netloc,
                                              "path": parsed_url.path, "resource_type": request.resource_type})
             def response_probe(response):
                 parsed_url = urlparse(response.url)
-                if len(related_responses) < 30:
-                    try:
-                        headers = response.headers
-                        content_type = headers.get("content-type", "")[:100]
-                    except Exception:
-                        content_type = ""
-                    if (parsed_url.netloc.lower() in {"topdjmixes.com", "www.topdjmixes.com", "files.topdjmixes.com"}
-                            or any(term in parsed_url.path.lower() for term in ("download", "admin-ajax", "/wp-json/"))):
+                try:
+                    headers = response.headers
+                    content_type = headers.get("content-type", "")[:100]
+                except Exception:
+                    content_type = ""
+                if (parsed_url.netloc.lower() in {"topdjmixes.com", "www.topdjmixes.com", "files.topdjmixes.com"}
+                        or any(term in parsed_url.path.lower() for term in ("download", "admin-ajax", "/wp-json/", "wpdm"))):
+                    if len(related_responses) < 40:
                         related_responses.append({"status": response.status, "host": parsed_url.netloc,
-                                                  "path": parsed_url.path, "content_type": content_type})
+                                                  "path": parsed_url.path, "content_type": content_type,
+                                                  "resource_type": response.request.resource_type})
+                # Save only small text/XHR responses for later inspection. Audio and binary
+                # response bodies are never read here.
+                if (len(related_response_objects) < 30
+                        and response.request.resource_type in ("xhr", "fetch")
+                        and any(term in content_type.lower() for term in ("json", "text", "javascript"))):
+                    related_response_objects.append(response)
             page.on("request", request_probe)
             page.on("response", response_probe)
             context.route("**/*", route_probe)
             click_error = None
             try:
-                download_button = page.locator(
-                    "a:visible,button:visible,[role='button']:visible,[onclick]:visible,"
-                    "[id*='download' i]:visible,[class*='download' i]:visible"
-                ).filter(has_text=re.compile(r"^\s*DOWNLOAD\s*$", re.I)).first
+                # This is the actual audio control rendered by TopDJMixes/WP Download Manager.
+                download_button = page.locator("a.wpdm-download-link.download-on-click:visible").first
+                if download_button.count():
+                    click_target = "a.wpdm-download-link.download-on-click"
+                else:
+                    # Keep a narrow fallback for a changed label/markup, but never click Save Tracklist.
+                    download_button = page.locator(
+                        "a:visible,button:visible,[role='button']:visible,[onclick]:visible,"
+                        "[id*='download' i]:visible,[class*='download' i]:visible"
+                    ).filter(has_text=re.compile(r"^\\s*DOWNLOAD\\s*$", re.I)).first
+                    click_target = "visible exact DOWNLOAD fallback"
                 if download_button.count():
                     download_button.click(timeout=7000)
-                    page.wait_for_timeout(2500)
+                    # Free-member download gates may include a countdown. Click once and wait
+                    # for the generated file URL; the route above aborts the MP3 request itself.
+                    for _ in range(80):
+                        page.wait_for_timeout(500)
+                        if intercepted_audio:
+                            break
+                        if page.locator('a[href*=".mp3" i],audio[src*=".mp3" i],source[src*=".mp3" i]').count():
+                            break
                 else:
-                    click_error = "No exact DOWNLOAD control found"
+                    click_error = "No visible WPDM download control or exact DOWNLOAD button found"
             except Exception as exc:
                 click_error = type(exc).__name__
-            finally:
-                context.unroute("**/*", route_probe)
-                page.remove_listener("request", request_probe)
-                page.remove_listener("response", response_probe)
-            log("browser_download_click_probe", controls=download_controls,
-                related_requests=related_requests[:20], related_responses=related_responses[:20], intercepted_audio=[
+
+            # Inspect only small text/XHR responses generated by the button. The file request
+            # itself is intercepted above; no audio body is downloaded.
+            for response in related_response_objects[:30]:
+                try:
+                    ctype = response.headers.get("content-type", "").lower()
+                    if not any(term in ctype for term in ("json", "text", "javascript")):
+                        continue
+                    if response.request.resource_type not in ("xhr", "fetch"):
+                        continue
+                    body_text = response.text()
+                    if len(body_text) > 500000:
+                        continue
+                    body_text = body_text.replace("\\/", "/").replace("\\u0026", "&")
+                    for raw in re.findall(r'''[^\\s"'<>]+\\.mp3(?:\\?[^\\s"'<>]*)?''', body_text, re.I):
+                        raw = html.unescape(raw).strip(" \\t\\r\\n\\\"'()[]{}<>,;")
+                        if raw.startswith("//"):
+                            raw = "https:" + raw
+                        candidate = absolute(raw, response.url)
+                        if is_mp3(candidate):
+                            audio_candidates.append(candidate)
+                except Exception:
+                    continue
+            audio_candidates = list(dict.fromkeys(audio_candidates))
+            post_click_links = page.locator("a[href]").evaluate_all(
+                "(els) => els.filter(a => /\\.mp3(?:\\?|$)/i.test(a.href) || /download/i.test(a.innerText||''))"
+                ".map(a => {const u=new URL(a.href,location.href); return {text:(a.innerText||'').trim().slice(0,80),"
+                "host:u.host,path:u.pathname,query_present:!!u.search,url_if_no_query:u.search?'':u.href};}).slice(0,20)"
+            )
+            finally_block_marker = None
+            context.unroute("**/*", route_probe)
+            page.remove_listener("request", request_probe)
+            page.remove_listener("response", response_probe)
+            log("browser_download_click_probe", click_target=click_target, controls=download_controls,
+                related_requests=related_requests[:30], related_responses=related_responses[:30],
+                post_click_links=post_click_links,
+                response_audio_candidates=[
+                    {"host": urlparse(u).netloc, "path": urlparse(u).path,
+                     "query_present": bool(urlparse(u).query),
+                     "url_if_no_query": u if not urlparse(u).query else None}
+                    for u in audio_candidates[:10]
+                ],
+                intercepted_audio=[
                     {"host": urlparse(u).netloc, "path": urlparse(u).path,
                      "query_present": bool(urlparse(u).query),
                      "url_if_no_query": u if not urlparse(u).query else None}
@@ -354,6 +415,24 @@ def authenticate(session: requests.Session):
                                         domain=cookie["domain"], path=cookie.get("path", "/"))
         finally:
             browser.close()
+
+    # Validate only audio URLs actually produced by the site's Download-button flow.
+    # Each check is a one-byte Range request; no full MP3 is read.
+    clicked_urls = list(dict.fromkeys(intercepted_audio + audio_candidates))
+    for audio_url in clicked_urls[:10]:
+        checked = validate_audio_url(session, audio_url, referer=sample_url)
+        final = urlparse(checked.get("url", audio_url))
+        original = urlparse(audio_url)
+        log("download_click_audio_range_probe",
+            original_host=original.netloc, original_path=original.path,
+            original_query_present=bool(original.query),
+            original_url_if_no_query=audio_url if not original.query else None,
+            valid=checked.get("valid"), status=checked.get("status"),
+            content_type=checked.get("content_type"), content_range=checked.get("content_range"),
+            length=checked.get("length"), error=checked.get("error"),
+            final_host=final.netloc, final_path=final.path,
+            final_query_present=bool(final.query),
+            final_url_if_no_query=checked.get("url") if not final.query else None)
 
     # Verify that the transferred HTTP session retains the same member access.
     probe = session.get(sample_url, headers={"Referer": LOGIN_URL}, timeout=45)

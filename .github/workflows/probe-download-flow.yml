@@ -1,0 +1,29 @@
+name: Probe TopDJMixes Download flow
+on:
+  push:
+    paths:
+      - 'tools/run_download_probe.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bestdjs-site-download-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install browser dependencies
+        run: |
+          python -m pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+      - name: Login and click the site's Download button once
+        env:
+          SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+        run: python tools/run_download_probe.py
