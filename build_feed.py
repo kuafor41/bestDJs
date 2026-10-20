@@ -93,6 +93,17 @@ def is_mp3(url: str) -> bool:
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
+def format_description(value: str) -> str:
+    """Preserve description line breaks and separate Size from Tracklist."""
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Normalize spaces within each line without collapsing the line breaks themselves.
+    text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n"))
+    text = text.strip()
+    # Force a visible blank line between Size and Tracklist, whether the source
+    # places them on one line or on separate lines. Keep all other line breaks.
+    text = re.sub(r"(?is)(Size:.*?)(?:\s*)(Tracklist:)", r"\1\n\n\2", text)
+    return text
+
 def form_payload(form):
     payload = {}
     for item in form.select("input[name], select[name], textarea[name], button[name]"):
@@ -650,7 +661,7 @@ def fetch_episode(session, url, fallback_title):
     for selector in ("meta[name='description']", "meta[property='og:description']"):
         node = soup.select_one(selector)
         if node and node.get("content"):
-            description = clean_text(node["content"])
+            description = format_description(node["content"])
             break
     return {"title": title, "page": url, "audio": audio, "audio_length": checked.get("length"), "date": parse_date(soup), "description": description}
 
