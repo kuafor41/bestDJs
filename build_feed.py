@@ -1575,6 +1575,31 @@ def write_rss(items):
     lines.extend(["</channel>", "</rss>", ""])
     OUT.write_text("\n".join(lines), encoding="utf-8")
 
+def validate_guid_retention(previous_items, current_items):
+    """Fail closed if any GUID from the previously published feed disappears."""
+    previous_guids = {
+        canonical_url(item.get("guid") or item.get("page", ""))
+        for item in previous_items
+        if item.get("guid") or item.get("page")
+    }
+    current_guids = {
+        canonical_url(item.get("guid") or item.get("page", ""))
+        for item in current_items
+        if item.get("guid") or item.get("page")
+    }
+    missing = sorted(guid for guid in previous_guids if guid not in current_guids)
+    if missing:
+        preview = ", ".join(missing[:10])
+        more = f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""
+        raise RuntimeError(
+            f"RSS history protection failed: {len(missing)} previously published GUID(s) "
+            f"would be removed: {preview}{more}. Production RSS was not written."
+        )
+    log("rss_guid_history_protection_passed",
+        previous_guid_count=len(previous_guids), current_guid_count=len(current_guids),
+        retained_count=len(previous_guids))
+
+
 def validate_feed(items):
     root = ET.parse(OUT).getroot()
     channel_image = root.find(f"./channel/{{{ITUNES_NS}}}image")
@@ -1895,6 +1920,8 @@ def main():
         raise RuntimeError("Playwright is required for authenticated Download-button clicks.") from exc
 
     existing_items = read_existing_feed()
+    # Immutable baseline: the final feed must retain every GUID published at run start.
+    previous_published_items = list(existing_items)
     existing_by_guid = {canonical_url(item.get("guid") or item["page"]): item for item in existing_items}
     queue_at_start = read_retry_queue()
     queue = dict(queue_at_start)
@@ -2075,6 +2102,8 @@ def main():
 
             apply_series_metadata(final_items, catalog_rows, posts)
             canonicalize_series_covers(final_items)
+            # Check before touching the production RSS file or tracking reports.
+            validate_guid_retention(previous_published_items, final_items)
             write_rss(final_items)
             validate_feed(final_items)
             write_inventory(show_rows, now, final_items, posts)

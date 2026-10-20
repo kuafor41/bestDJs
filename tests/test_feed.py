@@ -122,6 +122,26 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(rows[0]["cover"], rows[1]["cover"])
         self.assertNotEqual(rows[2]["cover"], rows[3]["cover"])
 
+    def test_guid_history_protection_allows_retained_and_new_episodes(self):
+        previous = [
+            {"guid": "https://www.topdjmixes.com/old-one/"},
+            {"guid": "https://www.topdjmixes.com/old-two/"},
+        ]
+        current = previous + [{"guid": "https://www.topdjmixes.com/new-one/"}]
+        build_feed.validate_guid_retention(previous, current)
+
+    def test_guid_history_protection_fails_if_any_old_episode_is_missing(self):
+        previous = [
+            {"guid": "https://www.topdjmixes.com/old-one/"},
+            {"guid": "https://www.topdjmixes.com/old-two/"},
+        ]
+        current = [
+            {"guid": "https://www.topdjmixes.com/old-one/"},
+            {"guid": "https://www.topdjmixes.com/new-one/"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "1 previously published GUID.*old-two"):
+            build_feed.validate_guid_retention(previous, current)
+
     def test_rss_channel_artwork_and_metadata_are_unique(self):
         from tempfile import TemporaryDirectory
         from pathlib import Path
