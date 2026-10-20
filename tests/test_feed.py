@@ -122,6 +122,38 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(rows[0]["cover"], rows[1]["cover"])
         self.assertNotEqual(rows[2]["cover"], rows[3]["cover"])
 
+    def test_rss_channel_artwork_and_metadata_are_unique(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from datetime import datetime, timezone
+        import xml.etree.ElementTree as ET
+        original_out = build_feed.OUT
+        try:
+            with TemporaryDirectory() as tmp:
+                build_feed.OUT = Path(tmp) / "rss.xml"
+                build_feed.write_rss([{
+                    "title": "Test Episode",
+                    "page": "https://www.topdjmixes.com/test-episode/",
+                    "guid": "https://www.topdjmixes.com/test-episode/",
+                    "date": datetime(2026, 10, 20, tzinfo=timezone.utc),
+                    "description": "Test audio",
+                    "cover": build_feed.PODCAST_COVER_URL,
+                    "audio": "https://files.topdjmixes.com/test-episode.mp3",
+                    "audio_length": 100,
+                }])
+                root = ET.parse(build_feed.OUT).getroot()
+                channel = root.find("./channel")
+                ns = build_feed.ITUNES_NS
+                self.assertEqual(len(channel.findall(f"{{{ns}}}author")), 1)
+                self.assertEqual(len(channel.findall(f"{{{ns}}}category")), 1)
+                images = channel.findall(f"{{{ns}}}image")
+                self.assertEqual(len(images), 1)
+                self.assertEqual(images[0].get("href"), build_feed.PODCAST_COVER_URL)
+                item = channel.find("item")
+                self.assertIsNotNone(item.find(f"{{{ns}}}image"))
+        finally:
+            build_feed.OUT = original_out
+
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 

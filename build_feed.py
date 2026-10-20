@@ -1554,7 +1554,6 @@ def write_rss(items):
         '<itunes:category text="Music"/>', '<itunes:explicit>no</itunes:explicit>',
         f'<lastBuildDate>{format_datetime(now, usegmt=True)}</lastBuildDate>',
     ]
-    lines.extend(['<itunes:author>bestDJs</itunes:author>', '<itunes:category text="Music"/>'])
     lines.append(f'<itunes:image href="{xml_escape(PODCAST_COVER_URL)}"/>')
     for item in items:
         date = item.get("date") or datetime.min.replace(tzinfo=timezone.utc)
@@ -1589,6 +1588,9 @@ def validate_feed(items):
         title = entry.findtext("title") or ""
         if not title or not entry.findtext("description") or not entry.findtext("pubDate") or not entry.findtext("guid"):
             raise RuntimeError(f"RSS item is missing title, description, date, or GUID: {title}")
+        image_node = entry.find(f"{{{ITUNES_NS}}}image")
+        if image_node is None or not image_node.get("href"):
+            raise RuntimeError(f"RSS item is missing artwork: {title}")
         guid = entry.findtext("guid")
         if guid in guids:
             raise RuntimeError(f"Duplicate RSS GUID detected: {guid}")
