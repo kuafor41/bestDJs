@@ -732,6 +732,7 @@ REST_URL = BASE + "/wp-json/wp/v2/posts"
 RETRY_CSV = Path("data/retry-queue.csv")
 REPORT_CSV = Path("data/update-report.csv")
 INVENTORY_CSV = Path("data/show-inventory.csv")
+SUCCESS_REPORT_CSV = Path("data/success-report.csv")
 REBUILD_ALL = os.environ.get("REBUILD_ALL", "").strip().lower() in ("1", "true", "yes", "on")
 PER_PAGE = 100
 MAX_REST_PAGES = int(os.environ.get("MAX_REST_PAGES", "600"))
@@ -1582,17 +1583,100 @@ def validate_feed(items):
         newest_date=dates[0].isoformat(), oldest_date=dates[-1].isoformat(),
         unique_guids=len(guids), sorted_newest_to_oldest=True)
 
-def write_inventory(show_rows, now):
+def write_inventory(show_rows, now, all_items=None):
+    """Keep a cumulative, link-backed list of every episode retained in the production RSS."""
     INVENTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    all_items = all_items or []
+    by_title = {}
+    for item in all_items:
+        title = item.get("title", "")
+        if title:
+            by_title[title] = item
+
+    previous = {}
+    if not REBUILD_ALL and INVENTORY_CSV.exists():
+        try:
+            with INVENTORY_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+                for old in csv.DictReader(handle):
+                    slug = (old.get("show_slug") or "").strip()
+                    if not slug:
+                        continue
+                    entries = []
+                    raw_list = old.get("episodes_for_radioshow", "")
+                    for line in raw_list.splitlines():
+                        match = re.match(r"^\\s*-\\s*\\[(.*?)\\]\\((https?://[^)]+)\\)\\s*$", line)
+                        if match:
+                            title, url = match.group(1).strip(), match.group(2).strip()
+                            entries.append({"title": title, "url": url})
+                    # Migrate the previous inventory format on its first updated run.
+                    if not entries:
+                        for title in (old.get("selected_titles") or "").split("; "):
+                            item = by_title.get(title)
+                            if title and item and item.get("page"):
+                                entries.append({"title": title, "url": item["page"]})
+                    previous[slug] = {
+                        "title": old.get("show_title") or slug.replace("-", " ").title(),
+                        "entries": entries,
+                    }
+        except (OSError, csv.Error):
+            previous = {}
+
+    merged = {}
+    for slug, value in previous.items():
+        merged[slug] = {"title": value["title"], "entries": list(value["entries"])}
+    for row in show_rows:
+        slug = row["show_slug"]
+        merged.setdefault(slug, {"title": row.get("show_title") or slug, "entries": []})
+        merged[slug]["title"] = row.get("show_title") or merged[slug]["title"]
+
+    # Add every currently retained feed item for which we know the show. Previously
+    # archived episodes remain in the cumulative list even when they are no longer
+    # among the latest five candidates examined during this run.
+    for item in all_items:
+        slug = (item.get("series_key") or "").strip()
+        if not slug or not item.get("title") or not item.get("page"):
+            continue
+        merged.setdefault(slug, {"title": item.get("series_title") or slug, "entries": []})
+        entries = merged[slug]["entries"]
+        if not any(entry["url"] == item["page"] for entry in entries):
+            entries.append({"title": item["title"], "url": item["page"]})
+
+    # Resolve URLs for the previous inventory's selected_titles against RSS items.
+    for row in show_rows:
+        slug = row["show_slug"]
+        entries = merged[slug]["entries"]
+        for title in (row.get("selected_titles") or "").split("; "):
+            item = by_title.get(title)
+            if title and item and item.get("page") and not any(entry["url"] == item["page"] for entry in entries):
+                entries.append({"title": title, "url": item["page"]})
+
+    # Preserve entries by URL, sort newest first where the current RSS has a date,
+    # and emit readable one-entry-per-line Markdown links in the CSV cell.
+    item_by_url = {item.get("page"): item for item in all_items if item.get("page")}
     fields = ["run_at_utc", "show_slug", "show_title", "source_episode_candidates",
               "episode_pages_selected", "added_this_run", "already_in_feed", "queued_failures",
-              "latest_selected_title", "latest_selected_date", "selected_titles"]
+              "latest_selected_title", "latest_selected_date", "selected_titles", "episodes_for_radioshow"]
     with INVENTORY_CSV.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in sorted(show_rows, key=lambda item: item["show_slug"]):
+            slug = row["show_slug"]
+            entries_by_url = {}
+            for entry in merged.get(slug, {}).get("entries", []):
+                url = entry.get("url", "")
+                if url:
+                    entries_by_url[url] = {"title": entry.get("title", ""), "url": url}
+            entries = list(entries_by_url.values())
+            entries.sort(key=lambda entry: (
+                item_by_url.get(entry["url"], {}).get("date", datetime.min.replace(tzinfo=timezone.utc)),
+                entry["title"]), reverse=True)
+            formatted = "\\n".join(
+                f"- [{entry['title'].replace(']', '')}]({entry['url']})"
+                for entry in entries if entry.get("title") and entry.get("url")
+            )
             writer.writerow({"run_at_utc": utc_iso(now),
-                **{key: row.get(key, "") for key in fields if key != "run_at_utc"}})
+                **{key: row.get(key, "") for key in fields if key not in ("run_at_utc", "episodes_for_radioshow")},
+                "episodes_for_radioshow": formatted})
 
 def append_update_report(now, rebuild, source_posts, show_count, selected_count,
                          added_items, retry_attempted, recovered_count, queue, failures):
@@ -1613,6 +1697,28 @@ def append_update_report(now, rebuild, source_posts, show_count, selected_count,
         "episode_titles": titles}
     new_file = not REPORT_CSV.exists() or REPORT_CSV.stat().st_size == 0
     with REPORT_CSV.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def append_success_report(now, added_items):
+    """Append the compact success report used by the other podcast repositories."""
+    SUCCESS_REPORT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["date_tr", "time_tr", "added_count", "episode_titles"]
+    local = now.astimezone(ZoneInfo("Europe/Istanbul"))
+    if added_items:
+        titles = " | ".join(
+            f"{item.get('series_title') or 'Unknown mixshow'} — {item.get('title') or 'Untitled episode'}"
+            for item in added_items
+        )
+    else:
+        titles = "Yeni bölüm bulunamadı"
+    row = {"date_tr": local.strftime("%d.%m.%Y"), "time_tr": local.strftime("%H:%M:%S"),
+           "added_count": len(added_items), "episode_titles": titles}
+    new_file = not SUCCESS_REPORT_CSV.exists() or SUCCESS_REPORT_CSV.stat().st_size == 0
+    with SUCCESS_REPORT_CSV.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         if new_file:
             writer.writeheader()
@@ -1787,7 +1893,7 @@ def main():
                 if REQUEST_DELAY:
                     time.sleep(REQUEST_DELAY)
 
-            write_inventory(show_rows, now)
+            write_inventory(show_rows, now, final_items)
             unique = {}
             for item in existing_items:
                 guid = canonical_url(item.get("guid") or item.get("page", ""))
@@ -1804,6 +1910,7 @@ def main():
             write_retry_queue(queue)
             append_update_report(now, REBUILD_ALL, len(posts), len(show_rows), len(selected),
                                  run_added_items, retry_attempted, recovered_count, queue, source_failures)
+            append_success_report(now, run_added_items)
             log("archive_update_complete", run_type="full_rebuild" if REBUILD_ALL else "incremental",
                 mixshows_discovered=len(show_rows), episode_candidates=len(posts),
                 episode_pages_selected=len(selected), rss_items=len(final_items),

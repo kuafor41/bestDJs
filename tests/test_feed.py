@@ -18,6 +18,21 @@ class FeedTests(unittest.TestCase):
         soup = BeautifulSoup('<audio src="https://example.com/file.m3u8"></audio>', "html.parser")
         self.assertIsNone(build_feed.find_audio(soup, "https://example.com/"))
 
+    def test_success_report_zero_uses_turkish_message(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from datetime import datetime, timezone
+        with TemporaryDirectory() as tmp:
+            original = build_feed.SUCCESS_REPORT_CSV
+            try:
+                build_feed.SUCCESS_REPORT_CSV = Path(tmp) / "success-report.csv"
+                build_feed.append_success_report(datetime(2026, 10, 20, tzinfo=timezone.utc), [])
+                content = build_feed.SUCCESS_REPORT_CSV.read_text(encoding="utf-8")
+                self.assertIn("added_count,episode_titles", content)
+                self.assertIn("0,Yeni bölüm bulunamadı", content)
+            finally:
+                build_feed.SUCCESS_REPORT_CSV = original
+
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 
