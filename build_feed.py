@@ -1474,7 +1474,7 @@ def read_existing_feed():
     return items
 
 RETRY_FIELDS = ["episode_url", "show_slug", "show_title", "episode_title", "source_date",
-                "first_seen_utc", "last_attempt_utc", "attempts", "next_retry_utc", "last_error", "status"]
+                "first_seen_utc", "last_attempt_utc", "attempts", "next_retry_utc", "last_error", "status", "retry_every_update"]
 
 def read_retry_queue():
     if not RETRY_CSV.exists():
@@ -1519,7 +1519,7 @@ def update_retry_failure(row, error, now):
     row["attempts"] = str(attempts)
     row["last_attempt_utc"] = utc_iso(now)
     row["last_error"] = error
-    if now - first_seen >= timedelta(days=RETRY_MAX_AGE_DAYS):
+    if row.get("retry_every_update", "").lower() != "true" and now - first_seen >= timedelta(days=RETRY_MAX_AGE_DAYS):
         row["status"] = "expired"
         row["next_retry_utc"] = ""
     else:
@@ -1533,6 +1533,8 @@ def retry_is_due(row, now):
     if row.get("status", "waiting") != "waiting":
         return False
     first_seen = parse_datetime_value(row.get("first_seen_utc")) or now
+    if row.get("retry_every_update", "").lower() == "true":
+        return True
     if now - first_seen >= timedelta(days=RETRY_MAX_AGE_DAYS):
         row["status"] = "expired"
         row["next_retry_utc"] = ""
@@ -1575,29 +1577,47 @@ def write_rss(items):
     lines.extend(["</channel>", "</rss>", ""])
     OUT.write_text("\n".join(lines), encoding="utf-8")
 
-def validate_guid_retention(previous_items, current_items):
-    """Fail closed if any GUID from the previously published feed disappears."""
-    previous_guids = {
-        canonical_url(item.get("guid") or item.get("page", ""))
-        for item in previous_items
-        if item.get("guid") or item.get("page")
-    }
+def queue_missing_published_items(previous_items, current_items, queue, now):
+    """Record historical RSS episodes that disappeared and retry them on every update."""
     current_guids = {
         canonical_url(item.get("guid") or item.get("page", ""))
         for item in current_items
         if item.get("guid") or item.get("page")
     }
-    missing = sorted(guid for guid in previous_guids if guid not in current_guids)
-    if missing:
-        preview = ", ".join(missing[:10])
-        more = f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""
-        raise RuntimeError(
-            f"RSS history protection failed: {len(missing)} previously published GUID(s) "
-            f"would be removed: {preview}{more}. Production RSS was not written."
-        )
-    log("rss_guid_history_protection_passed",
-        previous_guid_count=len(previous_guids), current_guid_count=len(current_guids),
-        retained_count=len(previous_guids))
+    missing_items = []
+    for item in previous_items:
+        guid = canonical_url(item.get("guid") or item.get("page", ""))
+        if not guid or guid in current_guids:
+            continue
+        missing_items.append(item)
+        if guid not in queue:
+            queue[guid] = {
+                "episode_url": canonical_url(item.get("page") or guid),
+                "show_slug": item.get("series_key", ""),
+                "show_title": item.get("series_title", ""),
+                "episode_title": item.get("title", "") or guid,
+                "source_date": utc_iso(item["date"]) if isinstance(item.get("date"), datetime) else str(item.get("date", "")),
+                "first_seen_utc": utc_iso(now),
+                "last_attempt_utc": "",
+                "attempts": "0",
+                "next_retry_utc": utc_iso(now),
+                "last_error": "previously_published_guid_missing_from_current_archive",
+                "status": "waiting",
+                "retry_every_update": "true",
+            }
+        else:
+            row = queue[guid]
+            row["retry_every_update"] = "true"
+            row["status"] = "waiting"
+            row["next_retry_utc"] = utc_iso(now)
+            if not row.get("last_error"):
+                row["last_error"] = "previously_published_guid_missing_from_current_archive"
+    log("rss_history_missing_queued", missing_count=len(missing_items),
+        newly_queued=sum(1 for item in missing_items
+                         if canonical_url(item.get("guid") or item.get("page", "")) in queue),
+        retry_every_update=True)
+    return missing_items
+
 
 
 def validate_feed(items):
@@ -2046,8 +2066,8 @@ def main():
                 })
 
             retry_attempted, recovered_count = 0, 0
-            retries = [row for url, row in queue_at_start.items()
-                       if url in queue and retry_is_due(queue[url], now)]
+            retries = [row for url, row in queue.items()
+                       if retry_is_due(row, now)]
             for row in sorted(retries, key=lambda entry: entry.get("next_retry_utc", "")):
                 url = canonical_url(row["episode_url"])
                 current = queue.get(url)
@@ -2102,8 +2122,9 @@ def main():
 
             apply_series_metadata(final_items, catalog_rows, posts)
             canonicalize_series_covers(final_items)
-            # Check before touching the production RSS file or tracking reports.
-            validate_guid_retention(previous_published_items, final_items)
+            # Do not block a healthy RSS update when an old source episode disappears.
+            # Record it for retry on every run; successful audio recovery removes it from the queue.
+            queue_missing_published_items(previous_published_items, final_items, queue, now)
             write_rss(final_items)
             validate_feed(final_items)
             write_inventory(show_rows, now, final_items, posts)

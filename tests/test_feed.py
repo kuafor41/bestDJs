@@ -174,6 +174,33 @@ class FeedTests(unittest.TestCase):
         finally:
             build_feed.OUT = original_out
 
+    def test_missing_published_episode_is_queued_for_every_update(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        old = [{"guid": "https://www.topdjmixes.com/old-episode/",
+                "page": "https://www.topdjmixes.com/old-episode/",
+                "title": "Old episode", "series_key": "test-show",
+                "series_title": "Test Show", "date": now - timedelta(days=500)}]
+        current = [{"guid": "https://www.topdjmixes.com/new-episode/",
+                    "page": "https://www.topdjmixes.com/new-episode/"}]
+        queue = {}
+        missing = build_feed.queue_missing_published_items(old, current, queue, now)
+        key = "https://www.topdjmixes.com/old-episode/"
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(queue[key]["last_error"], "previously_published_guid_missing_from_current_archive")
+        self.assertEqual(queue[key]["retry_every_update"], "true")
+        self.assertTrue(build_feed.retry_is_due(queue[key], now + timedelta(days=60)))
+
+    def test_missing_published_episode_not_queued_if_still_in_rss(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        item = {"guid": "https://www.topdjmixes.com/old-episode/",
+                "page": "https://www.topdjmixes.com/old-episode/"}
+        queue = {}
+        missing = build_feed.queue_missing_published_items([item], [item], queue, now)
+        self.assertEqual(missing, [])
+        self.assertEqual(queue, {})
+
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 
