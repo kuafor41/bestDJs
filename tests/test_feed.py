@@ -21,5 +21,15 @@ class FeedTests(unittest.TestCase):
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 
+    def test_description_preserves_line_breaks_and_separates_size_from_tracklist(self):
+        source = "Size: 274 Mb\nTracklist:\n1. First track\n2. Second track"
+        expected = "Size: 274 Mb\n\nTracklist:\n1. First track\n2. Second track"
+        self.assertEqual(build_feed.format_description(source), expected)
+
+    def test_description_adds_separator_when_size_and_tracklist_share_a_line(self):
+        source = "Intro\nSize: 274 Mb Tracklist:\n1. First track\n2. Second track"
+        expected = "Intro\nSize: 274 Mb\n\nTracklist:\n1. First track\n2. Second track"
+        self.assertEqual(build_feed.format_description(source), expected)
+
 if __name__ == "__main__":
     unittest.main()
