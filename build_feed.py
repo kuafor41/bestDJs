@@ -1049,61 +1049,174 @@ def login_in_browser(page, context, session, PlaywrightTimeoutError):
     if gate:
         raise RuntimeError("Transferred HTTP session does not retain Download access.")
 
-def discover_episode_posts(session):
-    """Read the full WordPress post index; grouping is derived from numbered episode slug prefixes."""
-    posts_by_url = {}
-    total_pages = None
-    total_posts = None
-    pages_read = 0
-    for page_num in range(1, MAX_REST_PAGES + 1):
-        params = {"per_page": PER_PAGE, "page": page_num, "orderby": "date", "order": "desc",
-                  "_fields": "link,date,date_gmt,slug,title,excerpt"}
-        try:
-            response = session.get(REST_URL, params=params, headers={"Referer": SHOWS_URL}, timeout=35)
-        except requests.RequestException as exc:
-            raise RuntimeError(f"WordPress REST page {page_num} request failed: {type(exc).__name__}") from exc
-        if response.status_code == 400 and page_num > 1:
-            break
-        response.raise_for_status()
-        try:
-            page_posts = response.json()
-        except ValueError as exc:
-            raise RuntimeError(f"WordPress REST page {page_num} did not return JSON.") from exc
-        if not isinstance(page_posts, list) or not page_posts:
-            break
-        pages_read += 1
-        try:
-            total_pages = int(response.headers.get("X-WP-TotalPages", total_pages or 0)) or total_pages
-            total_posts = int(response.headers.get("X-WP-Total", total_posts or 0)) or total_posts
-        except (TypeError, ValueError):
-            pass
-        for post in page_posts:
-            link = post.get("link", "")
-            parsed = urlparse(link)
+def extract_mixshow_catalog_links(soup: BeautifulSoup, page_url: str):
+    """Extract only the root-level archive links from the site's Mix Shows directory."""
+    excluded = {
+        "mix-shows", "mixshow", "shows", "login", "register", "news", "music-player",
+        "linklists", "schedule", "mobile-app", "contact", "privacy-policy", "terms",
+        "terms-conditions", "gdpr", "my-account", "membership-account", "wp-admin",
+        "wp-content", "wp-json", "category", "tag", "page", "author", "search",
+        "feed", "lost-password", "upgrade", "download",
+    }
+
+    def links_in(container):
+        found = {}
+        for anchor in container.select("a[href]"):
+            href = absolute(anchor.get("href", ""), page_url)
+            parsed = urlparse(href)
             if parsed.netloc.lower() not in ("www.topdjmixes.com", "topdjmixes.com"):
                 continue
-            canonical = canonical_url(link)
-            if canonical not in posts_by_url:
-                post["link"] = canonical
-                posts_by_url[canonical] = post
-        if page_num == 1 or page_num % 25 == 0 or (total_pages and page_num >= total_pages):
-            log("rest_discovery_progress", page=page_num, total_pages=total_pages,
-                source_posts_seen=len(posts_by_url), advertised_total_posts=total_posts)
-        if total_pages and page_num >= total_pages:
-            break
-        if not total_pages and len(page_posts) < PER_PAGE:
-            break
-        if REST_DELAY:
-            time.sleep(REST_DELAY)
-    if total_pages and pages_read >= MAX_REST_PAGES and pages_read < total_pages:
-        raise RuntimeError(f"REST scan safety limit reached ({pages_read}/{total_pages} pages); refusing a partial archive.")
-    if not posts_by_url:
-        raise RuntimeError("WordPress REST returned no episode candidates.")
-    log("rest_discovery_complete", pages_read=pages_read, advertised_total_pages=total_pages,
-        source_posts=len(posts_by_url))
-    return list(posts_by_url.values())
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) != 1:
+                continue
+            slug = parts[0].lower()
+            if slug in excluded or slug.startswith(("wp-", "page-")) or re.search(r"-\d+$", slug):
+                continue
+            title = clean_text(anchor.get_text(" ", strip=True)) or clean_text(anchor.get("title", ""))
+            if not title or len(title) < 2 or title.lower() in ("mix shows", "next", "previous"):
+                continue
+            found[canonical_url(href)] = title
+        return found
+
+    best = {}
+    for heading in soup.find_all(re.compile(r"^h[1-6]$")):
+        if clean_text(heading.get_text(" ", strip=True)).lower() != "mix shows":
+            continue
+        ancestor = heading
+        for _ in range(8):
+            ancestor = ancestor.parent
+            if not getattr(ancestor, "select", None):
+                break
+            candidates = links_in(ancestor)
+            if len(candidates) >= 50:
+                if len(candidates) > len(best):
+                    best = candidates
+                break
+    if len(best) < 50:
+        fallback = links_in(soup)
+        if len(fallback) > len(best):
+            best = fallback
+    return best
+
+
+def discover_episode_posts(session):
+    """Discover show archives from the site menu and fetch recent links inside each one."""
+    seeds = [SHOWS_URL, BASE + "/intelligent-waveforms/", BASE + "/a-dream-radio/"]
+    mixshows = {}
+    seed_results = []
+    for seed in seeds:
+        try:
+            response = session.get(seed, headers={"Referer": SHOWS_URL}, timeout=45)
+            response.raise_for_status()
+            found = extract_mixshow_catalog_links(BeautifulSoup(response.text, "html.parser"), response.url)
+            seed_results.append({"path": urlparse(seed).path, "count": len(found)})
+            log("mixshow_catalog_probe", seed_path=urlparse(seed).path,
+                found=len(found), sample=list(found.items())[:4])
+            if len(found) > len(mixshows):
+                mixshows = found
+            if len(mixshows) >= 100:
+                break
+        except requests.RequestException as exc:
+            log("mixshow_catalog_probe_error", seed_path=urlparse(seed).path, error=type(exc).__name__)
+
+    if len(mixshows) < 50:
+        raise RuntimeError(
+            "Mix Shows directory discovery returned fewer than 50 archives; refusing to alter production RSS. "
+            f"Probe results: {seed_results}"
+        )
+    if len(mixshows) > MAX_SERIES:
+        raise RuntimeError(f"Found {len(mixshows)} mixshows, above safety limit {MAX_SERIES}.")
+
+    log("mixshow_catalog_discovered", count=len(mixshows),
+        sample=[{"url": safe_url(url), "title": title} for url, title in list(mixshows.items())[:12]])
+    max_candidates = int(os.environ.get("MAX_CANDIDATES_PER_SHOW", "20"))
+    max_pages = int(os.environ.get("MAX_ARCHIVE_PAGES_PER_SHOW", "3"))
+    posts, globally_seen, census = [], set(), []
+
+    # This is intentionally bounded to each mixshow's own archive page(s), not
+    # the 41k-post site-wide WordPress archive.
+    for index, (show_url, menu_title) in enumerate(sorted(mixshows.items()), 1):
+        show_slug = urlparse(show_url).path.strip("/").split("/")[-1].lower()
+        show_title = menu_title
+        page_url = show_url
+        page_number = 1
+        pages_read = 0
+        candidates = []
+        show_seen = set()
+        archive_error = ""
+
+        while page_url and pages_read < max_pages and len(candidates) < max_candidates:
+            try:
+                response = session.get(page_url, headers={"Referer": SHOWS_URL}, timeout=45)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                archive_error = type(exc).__name__
+                log("mixshow_archive_fetch_error", show=show_slug, page=safe_url(page_url), error=archive_error)
+                break
+            soup = BeautifulSoup(response.text, "html.parser")
+            pages_read += 1
+            h1 = soup.select_one("h1.entry-title") or soup.select_one("article h1") or soup.select_one("h1")
+            if h1:
+                parsed_title = clean_text(h1.get_text(" ", strip=True))
+                if parsed_title:
+                    show_title = re.sub(r"\s*[|–-]\s*Top\s*DJ\s*Mixes.*$", "", parsed_title, flags=re.I).strip() or show_title
+
+            for episode_url, episode_title in extract_show_links(soup, response.url).items():
+                episode_url = canonical_url(episode_url)
+                if episode_url in show_seen or episode_url in globally_seen:
+                    continue
+                show_seen.add(episode_url)
+                globally_seen.add(episode_url)
+                slug = urlparse(episode_url).path.strip("/").split("/")[-1]
+                candidates.append({
+                    "link": episode_url, "slug": slug, "title": {"rendered": episode_title},
+                    "series_key": show_slug, "series_title": show_title,
+                    "date": "", "date_gmt": "",
+                })
+                if len(candidates) >= max_candidates:
+                    break
+
+            show_path = urlparse(show_url).path.rstrip("/")
+            next_pages = []
+            for anchor in soup.select("a[href]"):
+                href = absolute(anchor.get("href", ""), response.url)
+                parsed = urlparse(href)
+                if parsed.netloc.lower() not in ("www.topdjmixes.com", "topdjmixes.com"):
+                    continue
+                match = re.fullmatch(re.escape(show_path) + r"/page/(\d+)/?", parsed.path)
+                if match and int(match.group(1)) > page_number:
+                    next_pages.append((int(match.group(1)), href))
+            if len(candidates) >= max_candidates or not next_pages:
+                break
+            page_number, page_url = min(next_pages, key=lambda item: item[0])
+            if REST_DELAY:
+                time.sleep(REST_DELAY)
+
+        census.append({
+            "show_slug": show_slug, "show_title": show_title,
+            "source_episode_candidates": len(candidates),
+            "archive_pages_read": pages_read, "archive_error": archive_error,
+        })
+        posts.extend(candidates)
+        if index == 1 or index % 10 == 0 or index == len(mixshows):
+            log("mixshow_discovery_progress", checked=index, total_mixshows=len(mixshows),
+                episode_candidates=len(posts))
+        if REQUEST_DELAY:
+            time.sleep(REQUEST_DELAY)
+
+    log("mixshow_episode_discovery_complete", mixshows=len(mixshows), candidates=len(posts),
+        candidates_per_show=max_candidates, archive_pages_per_show=max_pages,
+        shows_with_no_episode_links=sum(1 for row in census if row["source_episode_candidates"] == 0),
+        shows_with_archive_errors=sum(1 for row in census if row["archive_error"]))
+    if not posts:
+        raise RuntimeError("Mixshow archives were found, but no episode links were discovered.")
+    return posts
+
 
 def series_key_for_post(post):
+    explicit = str(post.get("series_key") or "").strip().lower()
+    if explicit:
+        return explicit
     slug = str(post.get("slug") or urlparse(post.get("link", "")).path.strip("/").split("/")[-1]).lower().strip("/")
     match = re.fullmatch(r"(?P<series>[a-z0-9][a-z0-9-]*?)-(?P<episode>\d+[a-z]?)", slug, flags=re.I)
     if not match:
@@ -1112,6 +1225,20 @@ def series_key_for_post(post):
     if len(key) < 2 or key in {"episode", "mix", "mixshow", "show", "news", "review", "top"}:
         return None
     return key
+
+
+def group_posts_by_series(posts):
+    groups = defaultdict(list)
+    for post in posts:
+        key = post.get("series_key") or series_key_for_post(post)
+        if key:
+            groups[key].append(post)
+    # Do not re-sort by episode number: source archive-page order is newest-first.
+    log("series_grouping_complete", candidate_series=len(groups),
+        total_episode_candidates=sum(len(rows) for rows in groups.values()),
+        series_sample=[{"slug": key, "candidate_pages": len(rows),
+                        "latest_title": rest_title(rows[0])} for key, rows in list(groups.items())[:12]])
+    return groups
 
 def rest_date(post):
     return parse_datetime_value(post.get("date_gmt") or post.get("date")) or datetime.min.replace(tzinfo=timezone.utc)
@@ -1491,11 +1618,15 @@ def append_update_report(now, rebuild, source_posts, show_count, selected_count,
             writer.writeheader()
         writer.writerow(row)
 
+
 def main():
     if not USER or not PASSWORD:
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD GitHub Actions secrets are required.")
-    if MAX_REST_PAGES < 1 or MAX_SERIES < 1:
-        raise RuntimeError("MAX_REST_PAGES and MAX_DISCOVERED_SHOWS must be positive.")
+    if MAX_SERIES < 1:
+        raise RuntimeError("MAX_DISCOVERED_SHOWS must be positive.")
+    if EPISODES_PER_SHOW != 5:
+        raise RuntimeError("This archive policy requires five newest episodes per mixshow.")
+
     now = datetime.now(timezone.utc)
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -1510,7 +1641,8 @@ def main():
     queue_at_start = read_retry_queue()
     queue = dict(queue_at_start)
     if REBUILD_ALL:
-        log("full_rebuild_requested", existing_feed_items=len(existing_items), previous_retry_items=len(queue_at_start))
+        log("full_rebuild_requested", existing_feed_items=len(existing_items),
+            previous_retry_items=len(queue_at_start))
         existing_items, existing_by_guid, queue, queue_at_start = [], {}, {}, {}
 
     with sync_playwright() as playwright:
@@ -1522,62 +1654,76 @@ def main():
             posts = discover_episode_posts(session)
             groups = group_posts_by_series(posts)
             if not groups:
-                raise RuntimeError("No numbered episode series could be derived from TopDJMixes.")
+                raise RuntimeError("No mixshow archives with episode links were discovered.")
+
             show_rows, selected, run_added_items = [], [], []
             source_failures = 0
             for index, (show_key, show_posts) in enumerate(sorted(groups.items()), 1):
-                stats = {"show_slug": show_key, "show_title": show_key.replace("-", " ").title(),
+                show_title = str(show_posts[0].get("series_title") or show_key.replace("-", " ").title())
+                stats = {
+                    "show_slug": show_key, "show_title": show_title,
                     "source_episode_candidates": len(show_posts), "episode_pages_selected": 0,
                     "added_this_run": 0, "already_in_feed": 0, "queued_failures": 0,
-                    "latest_selected_title": "", "latest_selected_date": "", "selected_titles": ""}
-                selected_for_show, unresolved, examined = [], 0, 0
+                    "latest_selected_title": "", "latest_selected_date": "", "selected_titles": "",
+                }
+                covered, examined, selected_titles = 0, 0, []
+
+                # The show archive supplies newest-first episode links. Existing RSS
+                # items count as already covered; unresolvable candidates enter the
+                # retry CSV and we continue backwards until five usable episodes exist.
                 for post in show_posts:
-                    if len(selected_for_show) + unresolved >= EPISODES_PER_SHOW:
+                    if covered >= EPISODES_PER_SHOW:
                         break
                     examined += 1
-                    item, error, candidate_is_episode = inspect_episode_post(session, post, show_key)
-                    if item:
-                        selected_for_show.append(item)
-                    elif error == "not_an_episode_page":
-                        pass
-                    elif candidate_is_episode:
-                        title = rest_title(post) or post.get("slug", "")
-                        add_retry(queue, post["link"], show_key, stats["show_title"], title,
-                                  rest_date(post), error or "episode_page_unavailable", now)
-                        unresolved += 1
-                        stats["queued_failures"] += 1
-                        source_failures += 1
-                    if len(selected_for_show) + unresolved < EPISODES_PER_SHOW and REQUEST_DELAY:
-                        time.sleep(REQUEST_DELAY)
-                    if examined >= min(len(show_posts), EPISODES_PER_SHOW + 12) and not selected_for_show:
-                        break
-                selected_for_show.sort(key=lambda item: item["date"], reverse=True)
-                selected_for_show = selected_for_show[:EPISODES_PER_SHOW]
-                stats["episode_pages_selected"] = len(selected_for_show) + unresolved
-                stats["selected_titles"] = "; ".join(item["title"] for item in selected_for_show)
-                if selected_for_show:
-                    stats["latest_selected_title"] = selected_for_show[0]["title"]
-                    stats["latest_selected_date"] = utc_iso(selected_for_show[0]["date"])
-                for item in selected_for_show:
-                    item["series_key"] = show_key
-                    item["series_title"] = item.get("series_title") or stats["show_title"]
-                    selected.append(item)
-                    guid = canonical_url(item.get("guid") or item["page"])
+                    episode_url = canonical_url(post["link"])
+                    guid = episode_url
+
                     if not REBUILD_ALL and guid in existing_by_guid:
+                        old_item = existing_by_guid[guid]
+                        covered += 1
                         stats["already_in_feed"] += 1
+                        selected_titles.append(old_item.get("title") or rest_title(post) or post["slug"])
+                        if not stats["latest_selected_date"]:
+                            stats["latest_selected_date"] = utc_iso(old_item["date"])
                         continue
-                    if guid in queue:
+
+                    # New queue entries are not hammered on every six-hour run.
+                    # A due retry is handled once in the separate retry pass below.
+                    if guid in queue and queue[guid].get("status", "waiting") == "waiting":
                         continue
+
+                    item, error, is_episode = inspect_episode_post(session, post, show_key)
+                    if not item:
+                        if is_episode:
+                            add_retry(queue, episode_url, show_key, show_title, rest_title(post) or post["slug"],
+                                      rest_date(post), error or "episode_page_unavailable", now)
+                            stats["queued_failures"] += 1
+                            source_failures += 1
+                        else:
+                            log("archive_candidate_skipped", show=show_key, page=safe_url(episode_url),
+                                reason=error or "not_an_episode_page")
+                        if REQUEST_DELAY:
+                            time.sleep(REQUEST_DELAY)
+                        continue
+
+                    item["series_key"] = show_key
+                    item["series_title"] = item.get("series_title") or show_title
+                    selected.append(item)
                     audio, length = click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError)
                     if audio:
                         item["audio"], item["audio_length"] = audio, length or 0
                         existing_by_guid[guid] = item
                         existing_items.append(item)
                         run_added_items.append(item)
+                        covered += 1
                         stats["added_this_run"] += 1
+                        selected_titles.append(item["title"])
+                        if not stats["latest_selected_date"]:
+                            stats["latest_selected_date"] = utc_iso(item["date"])
                         log("episode_added_to_archive", show=show_key, title=item["title"],
                             date=item["date"].isoformat(), page=safe_url(item["page"]),
-                            audio_host=urlparse(audio).netloc, cover_found=bool(item.get("cover")))
+                            audio_host=urlparse(audio).netloc, cover_found=bool(item.get("cover")),
+                            covered_slots=covered)
                     else:
                         add_retry(queue, item["page"], show_key, item["series_title"], item["title"],
                                   item["date"], "download_click_or_audio_validation_failed", now)
@@ -1585,25 +1731,34 @@ def main():
                         source_failures += 1
                     if REQUEST_DELAY:
                         time.sleep(REQUEST_DELAY)
+
+                stats["episode_pages_selected"] = covered
+                stats["selected_titles"] = "; ".join(selected_titles)
+                if selected_titles:
+                    stats["latest_selected_title"] = selected_titles[0]
                 show_rows.append(stats)
+
                 if index == 1 or index % 10 == 0 or index == len(groups):
                     log("mixshow_archive_progress", checked=index, total_groups=len(groups),
-                        candidate_posts=len(posts), selected_episode_pages=len(selected),
+                        episode_candidates=len(posts), selected_usable=covered,
                         rss_items=len(existing_items), retry_queue=len(queue))
 
             retry_attempted, recovered_count = 0, 0
             retries = [row for url, row in queue_at_start.items()
                        if url in queue and retry_is_due(queue[url], now)]
-            for row in sorted(retries, key=lambda item: item.get("next_retry_utc", "")):
+            for row in sorted(retries, key=lambda entry: entry.get("next_retry_utc", "")):
                 url = canonical_url(row["episode_url"])
                 current = queue.get(url)
                 if current is None or current.get("status") != "waiting":
                     continue
                 retry_attempted += 1
-                episode_post = {"link": url, "slug": urlparse(url).path.strip("/").split("/")[-1],
+                episode_post = {
+                    "link": url, "slug": urlparse(url).path.strip("/").split("/")[-1],
                     "date": current.get("source_date", ""), "date_gmt": current.get("source_date", ""),
-                    "title": {"rendered": current.get("episode_title", "")}}
-                item, error, candidate_is_episode = inspect_episode_post(session, episode_post, current.get("show_slug", ""))
+                    "title": {"rendered": current.get("episode_title", "")},
+                    "series_key": current.get("show_slug", ""), "series_title": current.get("show_title", ""),
+                }
+                item, error, is_episode = inspect_episode_post(session, episode_post, current.get("show_slug", ""))
                 if not item:
                     if error == "not_an_episode_page":
                         queue.pop(url, None)
@@ -1611,6 +1766,7 @@ def main():
                     else:
                         update_retry_failure(current, error or "episode_page_unavailable", now)
                     continue
+
                 audio, length = click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError)
                 if not audio:
                     update_retry_failure(current, "download_click_or_audio_validation_failed", now)
@@ -1626,7 +1782,8 @@ def main():
                         run_added_items.append(item)
                     queue.pop(url, None)
                     recovered_count += 1
-                    log("retry_queue_recovered", page=safe_url(url), title=item["title"], added_to_rss=not was_in_feed)
+                    log("retry_queue_recovered", page=safe_url(url), title=item["title"],
+                        added_to_rss=not was_in_feed)
                 if REQUEST_DELAY:
                     time.sleep(REQUEST_DELAY)
 
@@ -1641,15 +1798,17 @@ def main():
             final_items = list(unique.values())
             if not final_items:
                 raise RuntimeError("No validated episodes are available; production RSS was not written.")
+
             write_rss(final_items)
             validate_feed(final_items)
             write_retry_queue(queue)
             append_update_report(now, REBUILD_ALL, len(posts), len(show_rows), len(selected),
                                  run_added_items, retry_attempted, recovered_count, queue, source_failures)
             log("archive_update_complete", run_type="full_rebuild" if REBUILD_ALL else "incremental",
-                source_posts_scanned=len(posts), mixshows_discovered=len(show_rows),
-                episode_pages_selected=len(selected), rss_items=len(final_items), added_count=len(run_added_items),
-                retry_attempted=retry_attempted, recovered_count=recovered_count,
+                mixshows_discovered=len(show_rows), episode_candidates=len(posts),
+                episode_pages_selected=len(selected), rss_items=len(final_items),
+                added_count=len(run_added_items), retry_attempted=retry_attempted,
+                recovered_count=recovered_count,
                 retry_waiting=sum(1 for row in queue.values() if row.get("status") == "waiting"),
                 retry_expired=sum(1 for row in queue.values() if row.get("status") == "expired"),
                 source_failures=source_failures, rss_file=str(OUT))
