@@ -991,18 +991,25 @@ def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str, sessio
         node = soup.select_one(selector)
         if node and node.get("content"):
             add(node["content"], "meta", node.get("alt", ""), node.get("title", ""))
-    entry = soup.select_one(".entry-content") or soup.select_one("article")
-    if entry:
-        for node in entry.select("img"):
-            raw = (node.get("data-src") or node.get("data-lazy-src") or node.get("data-original")
-                   or node.get("src") or "")
-            width = int(node.get("width", "0")) if str(node.get("width", "0")).isdigit() else 0
-            height = int(node.get("height", "0")) if str(node.get("height", "0")).isdigit() else 0
-            add(raw, "content", node.get("alt", ""), node.get("title", ""), width, height)
-            srcset = node.get("srcset", "")
-            if srcset:
-                last = srcset.split(",")[-1].strip().split(" ")[0]
-                add(last, "content", node.get("alt", ""), node.get("title", ""), width, height)
+    # WordPress often moved the live featured artwork into the article header while
+    # older OpenGraph and body-image URLs remained stale. Scan all image elements,
+    # and also anchors that directly link to the full-sized image.
+    for node in soup.select("img"):
+        raw = (node.get("data-src") or node.get("data-lazy-src") or node.get("data-original")
+               or node.get("src") or "")
+        width = int(node.get("width", "0")) if str(node.get("width", "0")).isdigit() else 0
+        height = int(node.get("height", "0")) if str(node.get("height", "0")).isdigit() else 0
+        add(raw, "content", node.get("alt", ""), node.get("title", ""), width, height)
+        srcset = node.get("srcset", "")
+        if srcset:
+            last = srcset.split(",")[-1].strip().split(" ")[0]
+            add(last, "content", node.get("alt", ""), node.get("title", ""), width, height)
+    for anchor in soup.select("a[href]"):
+        href = anchor.get("href", "")
+        child = anchor.select_one("img")
+        alt = child.get("alt", "") if child else ""
+        title = " ".join((anchor.get("title", ""), anchor.get_text(" ", strip=True)))
+        add(href, "content", alt, title)
     ranked = sorted(candidates_by_url.items(), key=lambda pair: pair[1], reverse=True)
     for url, score in ranked:
         if score < 100:
@@ -1247,7 +1254,7 @@ def discover_episode_posts(session):
                 time.sleep(REST_DELAY)
 
         census.append({
-            "show_slug": show_slug, "show_title": show_title,
+            "show_slug": show_slug, "show_title": show_title, "show_url": show_url,
             "source_episode_candidates": len(candidates),
             "archive_pages_read": pages_read, "archive_error": archive_error,
         })
@@ -1763,6 +1770,7 @@ def refresh_existing_covers(items, session, catalog_rows, posts):
     if not items:
         return 0
     apply_series_metadata(items, catalog_rows, posts)
+    show_index = {str(row.get("show_slug") or "").strip().lower(): row for row in catalog_rows}
     groups = defaultdict(list)
     for item in items:
         old_cover = str(item.get("cover") or "").strip()
@@ -1776,8 +1784,27 @@ def refresh_existing_covers(items, session, catalog_rows, posts):
     refreshed_groups = 0
     for (old_cover, show_key), group_items in groups.items():
         new_cover = None
-        # Try a few episode pages belonging to this same show/old-cover group.
-        for item in group_items[:3]:
+        show_row = show_index.get(str(show_key).strip().lower(), {})
+        show_url = show_row.get("show_url", "")
+        show_title = show_row.get("show_title") or str(show_key).replace("-", " ").title()
+        # Most reliable source after a media-library migration is the current show archive page.
+        if show_url:
+            try:
+                response = session.get(show_url, headers={**HEADERS, "Referer": SHOWS_URL}, timeout=30)
+                if response.status_code < 400:
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    found = extract_cover(soup, response.url, show_title, session=session)
+                    if found and found != old_cover:
+                        new_cover = found
+                else:
+                    log("show_cover_refresh_http_error", show=show_key,
+                        page=safe_url(show_url), status=response.status_code)
+            except requests.RequestException as exc:
+                log("show_cover_refresh_error", show=show_key,
+                    page=safe_url(show_url), error=type(exc).__name__)
+
+        # Fall back to a few episode pages if the show archive did not expose a valid image.
+        for item in ([] if new_cover else group_items[:3]):
             page_url = item.get("page") or item.get("guid") or ""
             if not page_url:
                 continue

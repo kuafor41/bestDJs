@@ -111,6 +111,33 @@ class FeedTests(unittest.TestCase):
             soup, "https://www.topdjmixes.com/sunsets-612/", "Sun:Sets 612")
         self.assertEqual(cover, "https://www.topdjmixes.com/wp-content/uploads/2026/08/SunSets-1250x569.webp")
 
+    def test_cover_extractor_finds_live_featured_anchor_outside_entry_content(self):
+        live_url = "https://www.topdjmixes.com/wp-content/uploads/2026/08/Magic-Island-1250x569.webp"
+        soup = BeautifulSoup(
+            '<html><head><meta property="og:image" content="https://www.topdjmixes.com/wp-content/uploads/2024/08/Magic-Island.jpg"></head>'
+            '<body><article><header><a href="' + live_url + '" title="Magic Island">'
+            '<img src="https://www.topdjmixes.com/wp-content/uploads/2026/08/Magic-Island-300x300.webp" alt="Magic Island">'
+            '</a></header><div class="entry-content"><p>Episode text</p></div></article></body></html>',
+            "html.parser")
+        class FakeResponse:
+            def __init__(self, url):
+                self.status_code = 200 if url == live_url else 404
+                self.headers = {"Content-Type": "image/webp" if url == live_url else "text/html"}
+            def close(self):
+                pass
+        class FakeSession:
+            def get(self, url, **kwargs):
+                return FakeResponse(url)
+        original_cache = build_feed.COVER_URL_VALIDITY_CACHE
+        try:
+            build_feed.COVER_URL_VALIDITY_CACHE = {}
+            cover = build_feed.extract_cover(
+                soup, "https://www.topdjmixes.com/magic-island-657/", "Magic Island 657",
+                session=FakeSession())
+            self.assertEqual(cover, live_url)
+        finally:
+            build_feed.COVER_URL_VALIDITY_CACHE = original_cache
+
     def test_cover_url_liveness_rejects_http_404(self):
         class FakeResponse:
             status_code = 404
