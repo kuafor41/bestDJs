@@ -1893,7 +1893,6 @@ def main():
                 if REQUEST_DELAY:
                     time.sleep(REQUEST_DELAY)
 
-            write_inventory(show_rows, now, final_items)
             unique = {}
             for item in existing_items:
                 guid = canonical_url(item.get("guid") or item.get("page", ""))
@@ -1907,6 +1906,7 @@ def main():
 
             write_rss(final_items)
             validate_feed(final_items)
+            write_inventory(show_rows, now, final_items)
             write_retry_queue(queue)
             append_update_report(now, REBUILD_ALL, len(posts), len(show_rows), len(selected),
                                  run_added_items, retry_attempted, recovered_count, queue, source_failures)
