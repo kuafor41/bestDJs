@@ -33,6 +33,95 @@ class FeedTests(unittest.TestCase):
             finally:
                 build_feed.SUCCESS_REPORT_CSV = original
 
+    def test_read_existing_feed_keeps_history_when_rebuild_requested(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        original_out, original_rebuild = build_feed.OUT, build_feed.REBUILD_ALL
+        try:
+            with TemporaryDirectory() as tmp:
+                build_feed.OUT = Path(tmp) / "rss.xml"
+                build_feed.OUT.write_text('''<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><item><title>Older Show 1</title><link>https://www.topdjmixes.com/older-show-1/</link><guid>https://www.topdjmixes.com/older-show-1/</guid><pubDate>Tue, 20 Oct 2026 00:00:00 GMT</pubDate><description>old</description><itunes:image href="https://example.com/cover.jpg"/><enclosure url="https://files.topdjmixes.com/a.mp3" length="10" type="audio/mpeg"/></item></channel></rss>''', encoding="utf-8")
+                build_feed.REBUILD_ALL = True
+                items = build_feed.read_existing_feed()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["title"], "Older Show 1")
+        finally:
+            build_feed.OUT, build_feed.REBUILD_ALL = original_out, original_rebuild
+
+    def test_inventory_preserves_shows_missing_from_current_catalogue(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from datetime import datetime, timezone
+        import csv
+        original_path, original_rebuild = build_feed.INVENTORY_CSV, build_feed.REBUILD_ALL
+        try:
+            with TemporaryDirectory() as tmp:
+                build_feed.INVENTORY_CSV = Path(tmp) / "show-inventory.csv"
+                build_feed.REBUILD_ALL = True
+                build_feed.INVENTORY_CSV.write_text(
+                    'run_at_utc,show_slug,show_title,source_episode_candidates,episode_pages_selected,added_this_run,already_in_feed,queued_failures,latest_selected_title,latest_selected_date,selected_titles,episodes_for_radioshow\n'
+                    '2026-10-19T12:00:00+00:00,old-show,Old Show,2,1,0,1,0,Old Show 2,2026-10-18T00:00:00+00:00,Old Show 2; Old Show 1,"- [Old Show 2](https://www.topdjmixes.com/old-show-2/)\n- [Old Show 1](https://www.topdjmixes.com/old-show-1/)"\n',
+                    encoding="utf-8")
+                build_feed.write_inventory([], datetime(2026, 10, 20, tzinfo=timezone.utc), [])
+                with build_feed.INVENTORY_CSV.open(encoding="utf-8", newline="") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["show_slug"], "old-show")
+                self.assertIn("Old Show 1", rows[0]["episodes_for_radioshow"])
+        finally:
+            build_feed.INVENTORY_CSV, build_feed.REBUILD_ALL = original_path, original_rebuild
+
+    def test_inventory_appends_discovered_archive_links_not_in_rss(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from datetime import datetime, timezone
+        import csv
+        original_path = build_feed.INVENTORY_CSV
+        try:
+            with TemporaryDirectory() as tmp:
+                build_feed.INVENTORY_CSV = Path(tmp) / "show-inventory.csv"
+                posts = [
+                    {"link": "https://www.topdjmixes.com/old-show-3/", "slug": "old-show-3",
+                     "title": {"rendered": "Old Show 3"}, "series_key": "old-show",
+                     "series_title": "Old Show"},
+                    {"link": "https://www.topdjmixes.com/old-show-2/", "slug": "old-show-2",
+                     "title": {"rendered": "Old Show 2"}, "series_key": "old-show",
+                     "series_title": "Old Show"},
+                ]
+                build_feed.write_inventory(
+                    [{"show_slug": "old-show", "show_title": "Old Show", "source_episode_candidates": 2,
+                      "selected_titles": "Old Show 3"}],
+                    datetime(2026, 10, 20, tzinfo=timezone.utc), [], posts)
+                with build_feed.INVENTORY_CSV.open(encoding="utf-8", newline="") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(len(rows), 1)
+                links = rows[0]["episodes_for_radioshow"]
+                self.assertIn("https://www.topdjmixes.com/old-show-3/", links)
+                self.assertIn("https://www.topdjmixes.com/old-show-2/", links)
+        finally:
+            build_feed.INVENTORY_CSV = original_path
+
+    def test_missing_episode_covers_fall_back_to_podcast_cover(self):
+        rows = [{"title": "Sun:Sets", "series_key": "sun-sets", "cover": None}]
+        build_feed.canonicalize_series_covers(rows)
+        self.assertEqual(rows[0]["cover"], build_feed.PODCAST_COVER_URL)
+
+    def test_equivalent_cover_formats_use_jpeg_without_changing_episode_specific_art(self):
+        rows = [
+            {"title": "Octopus Trance Radio 100", "series_key": "octopus-trance-radio",
+             "cover": "https://www.topdjmixes.com/wp-content/uploads/2024/08/Octopus-Trance-Radio.jpg"},
+            {"title": "Octopus Trance Radio 101", "series_key": "octopus-trance-radio",
+             "cover": "https://www.topdjmixes.com/wp-content/uploads/2026/08/Octopus-Trance-Radio.webp"},
+            {"title": "The Anjunabeats Rising Residency 114", "series_key": "the-anjunabeats-rising-residency",
+             "cover": "https://www.topdjmixes.com/wp-content/uploads/2024/08/The-Anjunabeats-Rising-Residency-114-1.jpg"},
+            {"title": "The Anjunabeats Rising Residency 113", "series_key": "the-anjunabeats-rising-residency",
+             "cover": "https://www.topdjmixes.com/wp-content/uploads/2024/08/The-Anjunabeats-Rising-Residency-113-1.jpg"},
+        ]
+        build_feed.canonicalize_series_covers(rows)
+        self.assertTrue(rows[0]["cover"].endswith(".jpg"))
+        self.assertEqual(rows[0]["cover"], rows[1]["cover"])
+        self.assertNotEqual(rows[2]["cover"], rows[3]["cover"])
+
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 

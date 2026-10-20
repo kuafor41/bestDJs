@@ -744,6 +744,7 @@ RETRY_MAX_AGE_DAYS = int(os.environ.get("RETRY_MAX_AGE_DAYS", "45"))
 RETRY_INITIAL_HOURS = 6
 RETRY_MAX_HOURS = 72
 ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+PODCAST_COVER_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"
 ET.register_namespace("itunes", ITUNES_NS)
 
 def canonical_url(url: str) -> str:
@@ -1211,7 +1212,7 @@ def discover_episode_posts(session):
         shows_with_archive_errors=sum(1 for row in census if row["archive_error"]))
     if not posts:
         raise RuntimeError("Mixshow archives were found, but no episode links were discovered.")
-    return posts
+    return posts, census
 
 
 def series_key_for_post(post):
@@ -1284,12 +1285,14 @@ def inspect_episode_post(session, post, series_key):
         return None, "episode_date_missing", True
     description = extract_description(soup) or title
     cover = extract_cover(soup, response.url, title)
+    player_audio_candidate = find_audio(soup, response.url)
     page_url = canonical_url(response.url)
     item = {
         "title": title, "page": page_url, "guid": page_url, "slug": post.get("slug", ""),
         "series_key": series_key,
         "series_title": re.sub(r"\s+(?:episode\s*)?#?\d+[a-z]?$", "", title, flags=re.I).strip() or series_key.replace("-", " ").title(),
         "date": date, "date_source": date_source, "description": description, "cover": cover,
+        "player_audio_candidate": player_audio_candidate,
         "audio": "", "audio_length": 0,
     }
     log("episode_page_parsed", show=series_key, page=safe_url(page_url), title=title,
@@ -1299,12 +1302,33 @@ def inspect_episode_post(session, post, series_key):
     return item, None, True
 
 def click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError):
-    """Click the actual visible Download button and trace redirects without fetching MP3 bytes."""
+    """Check both the embedded player source and the Download control without downloading MP3 bytes."""
+    player_result = None
+    player_candidate = item.get("player_audio_candidate")
+    if player_candidate and is_mp3(player_candidate):
+        player_check = validate_audio_url(session, player_candidate, referer=item.get("page", SHOWS_URL))
+        player_final = player_check.get("url", player_candidate)
+        player_temporary = is_temporary_signed_url(player_final)
+        player_valid = player_check.get("valid") and is_mp3(player_final) and not player_temporary
+        log("episode_player_audio_probe", title=item.get("title", ""), page=safe_url(item.get("page", "")),
+            candidate_url=safe_url(player_candidate), valid=player_valid,
+            status=player_check.get("status"), content_type=player_check.get("content_type"),
+            final_host=urlparse(player_final).netloc, temporary_signature=player_temporary)
+        if player_valid:
+            player_result = (player_final, player_check.get("length"))
+
+    def use_player_fallback(reason):
+        if player_result:
+            log("episode_audio_player_fallback", title=item.get("title", ""),
+                page=safe_url(item.get("page", "")), reason=reason,
+                audio_host=urlparse(player_result[0]).netloc)
+            return player_result
+        return None, None
     try:
         page.goto(item["page"], wait_until="domcontentloaded", timeout=45000)
     except Exception as exc:
         log("episode_browser_navigation_error", title=item["title"], page=safe_url(item["page"]), error=type(exc).__name__)
-        return None, None
+        return use_player_fallback("download_page_navigation_failed")
     try:
         page.locator("a.wpdm-download-link.download-on-click:visible").wait_for(state="attached", timeout=12000)
     except PlaywrightTimeoutError:
@@ -1313,11 +1337,11 @@ def click_download_and_resolve_audio(page, context, session, item, PlaywrightTim
     body = clean_text(page.locator("body").inner_text(timeout=10000)).lower()
     if "please login to download or create a free account" in body:
         log("episode_browser_login_gate", title=item["title"], page=safe_url(item["page"]))
-        return None, None
+        return use_player_fallback("download_login_gate")
     button = page.locator("a.wpdm-download-link.download-on-click:visible").first
     if not button.count():
         log("episode_download_button_missing", title=item["title"], page=safe_url(item["page"]))
-        return None, None
+        return use_player_fallback("download_button_missing")
     captured = []
     redirect_trace = []
     def route_download(route):
@@ -1410,7 +1434,7 @@ def click_download_and_resolve_audio(page, context, session, item, PlaywrightTim
     if not unique_urls:
         log("episode_download_click_no_mp3", title=item["title"], page=safe_url(item["page"]),
             click_error=click_error, redirect_trace=redirect_trace[:8])
-        return None, None
+        return use_player_fallback("download_button_no_mp3_url")
     audio_url = unique_urls[0]
     checked = validate_audio_url(session, audio_url, referer=item["page"])
     final_url = checked.get("url", audio_url)
@@ -1425,11 +1449,11 @@ def click_download_and_resolve_audio(page, context, session, item, PlaywrightTim
     if not checked.get("valid") or not is_mp3(final_url) or temporary:
         if temporary:
             log("audio_url_rejected_temporary_signature", title=item["title"], final_url=safe_url(final_url))
-        return None, None
+        return use_player_fallback("download_audio_invalid_or_temporary")
     return final_url, checked.get("length")
 
 def read_existing_feed():
-    if REBUILD_ALL or not OUT.exists() or OUT.stat().st_size == 0:
+    if not OUT.exists() or OUT.stat().st_size == 0:
         return []
     root = ET.parse(OUT).getroot()
     items = []
@@ -1453,7 +1477,7 @@ RETRY_FIELDS = ["episode_url", "show_slug", "show_title", "episode_title", "sour
                 "first_seen_utc", "last_attempt_utc", "attempts", "next_retry_utc", "last_error", "status"]
 
 def read_retry_queue():
-    if REBUILD_ALL or not RETRY_CSV.exists():
+    if not RETRY_CSV.exists():
         return {}
     rows = {}
     with RETRY_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1530,9 +1554,8 @@ def write_rss(items):
         '<itunes:category text="Music"/>', '<itunes:explicit>no</itunes:explicit>',
         f'<lastBuildDate>{format_datetime(now, usegmt=True)}</lastBuildDate>',
     ]
-    channel_cover = next((item.get("cover") for item in items if item.get("cover")), "")
-    if channel_cover:
-        lines.append(f'<itunes:image href="{xml_escape(channel_cover)}"/>')
+    lines.extend(['<itunes:author>bestDJs</itunes:author>', '<itunes:category text="Music"/>'])
+    lines.append(f'<itunes:image href="{xml_escape(PODCAST_COVER_URL)}"/>')
     for item in items:
         date = item.get("date") or datetime.min.replace(tzinfo=timezone.utc)
         title = item.get("title") or item.get("guid") or item.get("page")
@@ -1555,6 +1578,9 @@ def write_rss(items):
 
 def validate_feed(items):
     root = ET.parse(OUT).getroot()
+    channel_image = root.find(f"./channel/{{{ITUNES_NS}}}image")
+    if channel_image is None or channel_image.get("href") != PODCAST_COVER_URL:
+        raise RuntimeError("RSS channel artwork is missing or does not match the committed bestDJs cover.")
     entries = root.findall("./channel/item")
     if not entries:
         raise RuntimeError("Production RSS has no valid episodes; refusing an empty published feed.")
@@ -1583,100 +1609,224 @@ def validate_feed(items):
         newest_date=dates[0].isoformat(), oldest_date=dates[-1].isoformat(),
         unique_guids=len(guids), sorted_newest_to_oldest=True)
 
-def write_inventory(show_rows, now, all_items=None):
-    """Keep a cumulative, link-backed list of every episode retained in the production RSS."""
-    INVENTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
-    all_items = all_items or []
-    by_title = {}
-    for item in all_items:
-        title = item.get("title", "")
-        if title:
-            by_title[title] = item
-
-    previous = {}
-    if not REBUILD_ALL and INVENTORY_CSV.exists():
+def apply_series_metadata(items, catalog_rows, posts):
+    """Attach show identity to every retained RSS item using the catalogue and episode URLs."""
+    known = {}
+    for row in catalog_rows:
+        slug = str(row.get("show_slug") or "").strip().lower()
+        title = str(row.get("show_title") or slug.replace("-", " ").title()).strip()
+        if slug:
+            known[slug] = title
+    if INVENTORY_CSV.exists():
         try:
             with INVENTORY_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
                 for old in csv.DictReader(handle):
-                    slug = (old.get("show_slug") or "").strip()
+                    slug = str(old.get("show_slug") or "").strip().lower()
+                    if slug:
+                        known.setdefault(slug, str(old.get("show_title") or slug.replace("-", " ").title()))
+        except (OSError, csv.Error):
+            pass
+    ordered = sorted(known.items(), key=lambda pair: len(pair[0]), reverse=True)
+    by_page = {canonical_url(post.get("link", "")): post for post in posts if post.get("link")}
+    def normal(value):
+        return re.sub(r"[^a-z0-9]+", " ", unquote(str(value or "")).lower()).strip()
+    for item in items:
+        key = str(item.get("series_key") or "").strip().lower()
+        show_title = str(item.get("series_title") or "").strip()
+        post = by_page.get(canonical_url(item.get("page") or item.get("guid") or ""))
+        if not key and post:
+            key = str(post.get("series_key") or series_key_for_post(post) or "").strip().lower()
+            show_title = str(post.get("series_title") or "")
+        page_slug = urlparse(item.get("page") or "").path.strip("/").split("/")[-1].lower()
+        if not key:
+            for candidate_slug, candidate_title in ordered:
+                if page_slug == candidate_slug or page_slug.startswith(candidate_slug + "-"):
+                    key, show_title = candidate_slug, candidate_title
+                    break
+        if not key:
+            title_norm = normal(item.get("title"))
+            for candidate_slug, candidate_title in ordered:
+                candidate_norm = normal(candidate_title)
+                if candidate_norm and title_norm.startswith(candidate_norm):
+                    key, show_title = candidate_slug, candidate_title
+                    break
+        if key:
+            item["series_key"] = key
+            if show_title:
+                item["series_title"] = show_title
+            elif key in known:
+                item["series_title"] = known[key]
+
+
+
+def canonicalize_series_covers(items):
+    # Normalize only clearly equivalent cover variants: same basename, optional
+    # WordPress duplicate suffix "-2", different file formats. Truly episode-specific
+    # image filenames (for example, numbered episode artwork) are left untouched.
+    groups = defaultdict(list)
+    for item in items:
+        if item.get("series_key"):
+            groups[item["series_key"]].append(item)
+    def cover_key(url):
+        stem = Path(unquote(urlparse(url).path)).stem.lower()
+        stem = re.sub(r"-2$", "", stem)
+        return re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
+    def cover_rank(url):
+        path = urlparse(url).path.lower()
+        ext = Path(path).suffix
+        # Prefer formats widely accepted by podcast apps over WebP when equivalent.
+        return ({".jpg": 4, ".jpeg": 4, ".png": 3, ".webp": 1}.get(ext, 0),
+                len(path))
+    for slug, rows in groups.items():
+        by_stem = defaultdict(list)
+        for item in rows:
+            cover = item.get("cover")
+            if cover:
+                by_stem[cover_key(cover)].append(cover)
+        if len(by_stem) == 1:
+            only_stem = next(iter(by_stem))
+            candidates = sorted(set(by_stem[only_stem]), key=cover_rank, reverse=True)
+            canonical = candidates[0]
+            for item in rows:
+                if item.get("cover") or not by_stem:
+                    if item.get("cover") and cover_key(item["cover"]) == only_stem:
+                        item["cover"] = canonical
+                    elif not item.get("cover"):
+                        item["cover"] = canonical
+            if len(set(by_stem[only_stem])) > 1:
+                log("series_cover_variants_normalized", show=slug, variants=len(set(by_stem[only_stem])),
+                    chosen_extension=Path(urlparse(canonical).path).suffix.lower())
+
+    # Items with no usable show art still get a valid image in podcast apps.
+    for item in items:
+        if not item.get("cover"):
+            item["cover"] = PODCAST_COVER_URL
+
+def write_inventory(show_rows, now, all_items=None, discovered_posts=None):
+    """Write a cumulative inventory; preserve older shows and episode links across every run."""
+    INVENTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    all_items = all_items or []
+    discovered_posts = discovered_posts or []
+    by_title = {item.get("title", ""): item for item in all_items if item.get("title")}
+    previous = {}
+    if INVENTORY_CSV.exists():
+        try:
+            with INVENTORY_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+                for old in csv.DictReader(handle):
+                    slug = str(old.get("show_slug") or "").strip().lower()
                     if not slug:
                         continue
                     entries = []
-                    raw_list = old.get("episodes_for_radioshow", "")
-                    for line in raw_list.splitlines():
+                    for line in (old.get("episodes_for_radioshow") or "").splitlines():
                         match = re.match(r"^\s*-\s*\[(.*?)\]\((https?://[^)]+)\)\s*$", line)
                         if match:
-                            title, url = match.group(1).strip(), match.group(2).strip()
+                            title, url = match.group(1).strip(), canonical_url(match.group(2).strip())
                             entries.append({"title": title, "url": url})
-                    # Migrate the previous inventory format on its first updated run.
                     if not entries:
                         for title in (old.get("selected_titles") or "").split("; "):
                             item = by_title.get(title)
                             if title and item and item.get("page"):
-                                entries.append({"title": title, "url": item["page"]})
-                    previous[slug] = {
-                        "title": old.get("show_title") or slug.replace("-", " ").title(),
-                        "entries": entries,
-                    }
+                                entries.append({"title": title, "url": canonical_url(item["page"])})
+                    previous[slug] = {"title": old.get("show_title") or slug.replace("-", " ").title(),
+                                      "entries": entries, "row": dict(old)}
         except (OSError, csv.Error):
-            previous = {}
+            # Do not silently erase a corrupted prior inventory. A malformed existing
+            # file should stop the run so its historical entries can be recovered.
+            raise RuntimeError("Previous show-inventory.csv could not be read safely; refusing to overwrite history.")
 
+    current_rows = {str(row.get("show_slug") or "").strip().lower(): dict(row)
+                    for row in show_rows if row.get("show_slug")}
     merged = {}
     for slug, value in previous.items():
         merged[slug] = {"title": value["title"], "entries": list(value["entries"])}
-    for row in show_rows:
-        slug = row["show_slug"]
-        merged.setdefault(slug, {"title": row.get("show_title") or slug, "entries": []})
+    for slug, row in current_rows.items():
+        merged.setdefault(slug, {"title": row.get("show_title") or slug.replace("-", " ").title(), "entries": []})
         merged[slug]["title"] = row.get("show_title") or merged[slug]["title"]
 
-    # Add every currently retained feed item for which we know the show. Previously
-    # archived episodes remain in the cumulative list even when they are no longer
-    # among the latest five candidates examined during this run.
+    # Every retained feed item is added to its owning show. This includes old episodes
+    # that no longer appear among the latest archive-page candidates.
     for item in all_items:
-        slug = (item.get("series_key") or "").strip()
-        if not slug or not item.get("title") or not item.get("page"):
+        slug = str(item.get("series_key") or "").strip().lower()
+        title, url = item.get("title", ""), item.get("page", "")
+        if not slug or not title or not url:
             continue
-        merged.setdefault(slug, {"title": item.get("series_title") or slug, "entries": []})
+        merged.setdefault(slug, {"title": item.get("series_title") or slug.replace("-", " ").title(), "entries": []})
         entries = merged[slug]["entries"]
-        if not any(entry["url"] == item["page"] for entry in entries):
-            entries.append({"title": item["title"], "url": item["page"]})
+        url = canonical_url(url)
+        if not any(canonical_url(entry.get("url", "")) == url for entry in entries):
+            entries.append({"title": title, "url": url})
 
-    # Resolve URLs for the previous inventory's selected_titles against RSS items.
-    for row in show_rows:
-        slug = row["show_slug"]
+    # Add every episode link seen in the current show archive pages, not just the
+    # five currently selected into RSS. The inventory grows cumulatively over runs.
+    discovered_order = {}
+    for index, post in enumerate(discovered_posts):
+        url = canonical_url(post.get("link") or "")
+        slug = str(post.get("series_key") or series_key_for_post(post) or "").strip().lower()
+        title = rest_title(post) or post.get("slug") or url
+        if not url or not slug or not title:
+            continue
+        discovered_order.setdefault(url, index)
+        merged.setdefault(slug, {
+            "title": post.get("series_title") or slug.replace("-", " ").title(),
+            "entries": [],
+        })
+        entries = merged[slug]["entries"]
+        if not any(canonical_url(entry.get("url", "")) == url for entry in entries):
+            entries.append({"title": title, "url": url})
+
+    # Migrate selected titles from the former short inventory format where possible.
+    for slug, row in current_rows.items():
         entries = merged[slug]["entries"]
         for title in (row.get("selected_titles") or "").split("; "):
             item = by_title.get(title)
-            if title and item and item.get("page") and not any(entry["url"] == item["page"] for entry in entries):
-                entries.append({"title": title, "url": item["page"]})
+            if title and item and item.get("page"):
+                url = canonical_url(item["page"])
+                if not any(canonical_url(entry.get("url", "")) == url for entry in entries):
+                    entries.append({"title": title, "url": url})
 
-    # Preserve entries by URL, sort newest first where the current RSS has a date,
-    # and emit readable one-entry-per-line Markdown links in the CSV cell.
-    item_by_url = {item.get("page"): item for item in all_items if item.get("page")}
+    item_by_url = {canonical_url(item.get("page") or ""): item for item in all_items if item.get("page")}
     fields = ["run_at_utc", "show_slug", "show_title", "source_episode_candidates",
-              "episode_pages_selected", "added_this_run", "already_in_feed", "queued_failures",
-              "latest_selected_title", "latest_selected_date", "selected_titles", "episodes_for_radioshow"]
+              "archive_status", "episode_pages_selected", "added_this_run", "already_in_feed",
+              "queued_failures", "latest_selected_title", "latest_selected_date", "selected_titles",
+              "episodes_for_radioshow"]
     with INVENTORY_CSV.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for row in sorted(show_rows, key=lambda item: item["show_slug"]):
-            slug = row["show_slug"]
+        for slug in sorted(set(previous) | set(current_rows) | set(merged)):
+            row = current_rows.get(slug) or previous.get(slug, {}).get("row", {})
+            title = (current_rows.get(slug, {}).get("show_title")
+                     or merged.get(slug, {}).get("title") or row.get("show_title")
+                     or slug.replace("-", " ").title())
             entries_by_url = {}
             for entry in merged.get(slug, {}).get("entries", []):
-                url = entry.get("url", "")
-                if url:
-                    entries_by_url[url] = {"title": entry.get("title", ""), "url": url}
+                url = canonical_url(entry.get("url", ""))
+                if url and entry.get("title"):
+                    entries_by_url[url] = {"title": entry["title"], "url": url}
             entries = list(entries_by_url.values())
-            entries.sort(key=lambda entry: (
-                item_by_url.get(entry["url"], {}).get("date", datetime.min.replace(tzinfo=timezone.utc)),
-                entry["title"]), reverse=True)
+            def entry_sort_key(entry):
+                url = canonical_url(entry["url"])
+                rss_item = item_by_url.get(url)
+                if rss_item and rss_item.get("date"):
+                    return (2, rss_item["date"].timestamp(), entry["title"])
+                if url in discovered_order:
+                    # Discovery follows each show archive's newest-first source order.
+                    return (1, -discovered_order[url], entry["title"])
+                return (0, 0.0, entry["title"])
+            entries.sort(key=entry_sort_key, reverse=True)
             formatted = "\n".join(
                 f"- [{entry['title'].replace(']', '')}]({entry['url']})"
                 for entry in entries if entry.get("title") and entry.get("url")
             )
-            writer.writerow({"run_at_utc": utc_iso(now),
-                **{key: row.get(key, "") for key in fields if key not in ("run_at_utc", "episodes_for_radioshow")},
-                "episodes_for_radioshow": formatted})
+            output = {field: row.get(field, "") for field in fields}
+            output["run_at_utc"] = utc_iso(now) if slug in current_rows else (row.get("run_at_utc") or "")
+            output["show_slug"] = slug
+            output["show_title"] = title
+            output["episodes_for_radioshow"] = formatted
+            if slug in current_rows and not output.get("archive_status"):
+                output["archive_status"] = "ok" if int(row.get("source_episode_candidates") or 0) else "no_episode_links"
+            writer.writerow(output)
+
+
 
 def append_update_report(now, rebuild, source_posts, show_count, selected_count,
                          added_items, retry_attempted, recovered_count, queue, failures):
@@ -1747,9 +1897,8 @@ def main():
     queue_at_start = read_retry_queue()
     queue = dict(queue_at_start)
     if REBUILD_ALL:
-        log("full_rebuild_requested", existing_feed_items=len(existing_items),
+        log("full_rebuild_requested_preserving_history", existing_feed_items=len(existing_items),
             previous_retry_items=len(queue_at_start))
-        existing_items, existing_by_guid, queue, queue_at_start = [], {}, {}, {}
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -1757,7 +1906,8 @@ def main():
         page = context.new_page()
         try:
             login_in_browser(page, context, session, PlaywrightTimeoutError)
-            posts = discover_episode_posts(session)
+            posts, catalog_rows = discover_episode_posts(session)
+            catalog_by_slug = {row["show_slug"]: row for row in catalog_rows}
             groups = group_posts_by_series(posts)
             if not groups:
                 raise RuntimeError("No mixshow archives with episode links were discovered.")
@@ -1768,7 +1918,8 @@ def main():
                 show_title = str(show_posts[0].get("series_title") or show_key.replace("-", " ").title())
                 stats = {
                     "show_slug": show_key, "show_title": show_title,
-                    "source_episode_candidates": len(show_posts), "episode_pages_selected": 0,
+                    "source_episode_candidates": len(show_posts), "archive_status": ("fetch_error:" + str(catalog_by_slug[show_key]["archive_error"])) if catalog_by_slug.get(show_key, {}).get("archive_error") else "ok",
+                    "episode_pages_selected": 0,
                     "added_this_run": 0, "already_in_feed": 0, "queued_failures": 0,
                     "latest_selected_title": "", "latest_selected_date": "", "selected_titles": "",
                 }
@@ -1784,7 +1935,7 @@ def main():
                     episode_url = canonical_url(post["link"])
                     guid = episode_url
 
-                    if not REBUILD_ALL and guid in existing_by_guid:
+                    if guid in existing_by_guid:
                         old_item = existing_by_guid[guid]
                         covered += 1
                         stats["already_in_feed"] += 1
@@ -1849,6 +2000,22 @@ def main():
                         episode_candidates=len(posts), selected_usable=covered,
                         rss_items=len(existing_items), retry_queue=len(queue))
 
+            current_show_slugs = {row["show_slug"] for row in show_rows}
+            for catalog_row in catalog_rows:
+                slug = catalog_row["show_slug"]
+                if slug in current_show_slugs:
+                    continue
+                archive_error = catalog_row.get("archive_error", "")
+                show_rows.append({
+                    "show_slug": slug,
+                    "show_title": catalog_row.get("show_title") or slug.replace("-", " ").title(),
+                    "source_episode_candidates": 0,
+                    "archive_status": ("fetch_error:" + archive_error) if archive_error else "no_episode_links",
+                    "episode_pages_selected": 0, "added_this_run": 0, "already_in_feed": 0,
+                    "queued_failures": 0, "latest_selected_title": "", "latest_selected_date": "",
+                    "selected_titles": "",
+                })
+
             retry_attempted, recovered_count = 0, 0
             retries = [row for url, row in queue_at_start.items()
                        if url in queue and retry_is_due(queue[url], now)]
@@ -1904,9 +2071,11 @@ def main():
             if not final_items:
                 raise RuntimeError("No validated episodes are available; production RSS was not written.")
 
+            apply_series_metadata(final_items, catalog_rows, posts)
+            canonicalize_series_covers(final_items)
             write_rss(final_items)
             validate_feed(final_items)
-            write_inventory(show_rows, now, final_items)
+            write_inventory(show_rows, now, final_items, posts)
             write_retry_queue(queue)
             append_update_report(now, REBUILD_ALL, len(posts), len(show_rows), len(selected),
                                  run_added_items, retry_attempted, recovered_count, queue, source_failures)
