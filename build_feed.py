@@ -94,15 +94,41 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 def format_description(value: str) -> str:
-    """Preserve description line breaks and separate Size from Tracklist."""
+    """Preserve description line breaks and put two blank lines before Tracklist."""
     text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
     # Normalize spaces within each line without collapsing the line breaks themselves.
     text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n"))
     text = text.strip()
-    # Force a visible blank line between Size and Tracklist, whether the source
-    # places them on one line or on separate lines. Keep all other line breaks.
-    text = re.sub(r"(?is)(Size:.*?)(?:\s*)(Tracklist:)", r"\1\n\n\2", text)
+    # Exactly two empty lines (three newline characters) separate Size and Tracklist.
+    text = re.sub(r"(?is)(Size:.*?)(?:\s*)(Tracklist:)", r"\1\n\n\n\2", text)
     return text
+
+def extract_description(soup: BeautifulSoup) -> str:
+    """Prefer the actual episode content so Size/Tracklist are present in RSS."""
+    selectors = (
+        ".entry-content", ".post-content", ".wp-block-post-content",
+        ".elementor-widget-theme-post-content", "article",
+    )
+    for selector in selectors:
+        for node in soup.select(selector):
+            # Work on a copy so formatting doesn't mutate the parsed page.
+            content = BeautifulSoup(str(node), "html.parser")
+            for br in content.select("br"):
+                br.replace_with("\n")
+            for block in content.select("p, div, li, h1, h2, h3, h4, h5, h6, tr"):
+                block.insert_before("\n")
+                block.insert_after("\n")
+            text = content.get_text()
+            text = re.sub(r"\n[ \t]*\n+", "\n", text)
+            text = format_description(text)
+            if re.search(r"(?i)Size\s*:", text) and re.search(r"(?i)Tracklist\s*:", text):
+                return text
+    # Fall back to description metadata when page content has no Size/Tracklist.
+    for selector in ("meta[name='description']", "meta[property='og:description']"):
+        node = soup.select_one(selector)
+        if node and node.get("content"):
+            return format_description(node["content"])
+    return ""
 
 def form_payload(form):
     payload = {}
@@ -657,12 +683,7 @@ def fetch_episode(session, url, fallback_title):
             error=checked.get("error"))
         return None
     audio = checked["url"]
-    description = ""
-    for selector in ("meta[name='description']", "meta[property='og:description']"):
-        node = soup.select_one(selector)
-        if node and node.get("content"):
-            description = format_description(node["content"])
-            break
+    description = extract_description(soup)
     return {"title": title, "page": url, "audio": audio, "audio_length": checked.get("length"), "date": parse_date(soup), "description": description}
 
 def xml_escape(s):
