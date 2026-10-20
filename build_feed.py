@@ -720,6 +720,7 @@ def write_rss(items):
 
 # Incremental archive implementation. The isolated test workflow and its script remain untouched.
 import csv
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
@@ -793,6 +794,8 @@ def validate_audio_url(session: requests.Session, url: str, referer: str = SHOWS
         if response is not None:
             response.close()
 
+_original_extract_description = extract_description
+
 def extract_description(soup: BeautifulSoup) -> str:
     """Match the working test-feed formatter, including Size-to-PARTS spacing."""
     entry = soup.select_one(".entry-content") or soup.select_one("article")
@@ -826,8 +829,8 @@ def extract_description(soup: BeautifulSoup) -> str:
                 text = visible_text(node)
                 if re.match(r"^Date\s*:", text, re.I):
                     return text[:10000]
-        # Keep a descriptive fallback if the page layout lacks a Date block.
-        return clean_text(entry.get_text(" ", strip=True))[:10000]
+        # Retain the production extractor for layouts without a leading Date block.
+        return _original_extract_description(soup) or clean_text(entry.get_text(" ", strip=True))[:10000]
     chunks = []
     for node in nodes[start_index:]:
         if getattr(node, "get", None) and node.get("id") in ("download-link", "advert", "advert-mobile"):
