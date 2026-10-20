@@ -21,15 +21,25 @@ class FeedTests(unittest.TestCase):
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 
-    def test_description_preserves_line_breaks_and_separates_size_from_tracklist(self):
+    def test_description_preserves_line_breaks_and_adds_two_blank_lines(self):
         source = "Size: 274 Mb\nTracklist:\n1. First track\n2. Second track"
-        expected = "Size: 274 Mb\n\nTracklist:\n1. First track\n2. Second track"
+        expected = "Size: 274 Mb\n\n\nTracklist:\n1. First track\n2. Second track"
         self.assertEqual(build_feed.format_description(source), expected)
 
-    def test_description_adds_separator_when_size_and_tracklist_share_a_line(self):
+    def test_description_adds_two_blank_lines_when_size_and_tracklist_share_a_line(self):
         source = "Intro\nSize: 274 Mb Tracklist:\n1. First track\n2. Second track"
-        expected = "Intro\nSize: 274 Mb\n\nTracklist:\n1. First track\n2. Second track"
+        expected = "Intro\nSize: 274 Mb\n\n\nTracklist:\n1. First track\n2. Second track"
         self.assertEqual(build_feed.format_description(source), expected)
+
+    def test_extract_description_prefers_page_content_with_size_and_tracklist(self):
+        soup = BeautifulSoup(
+            '<article><div class="entry-content"><p>Show details</p>'
+            '<p>Size: 274 Mb</p><h3>Tracklist:</h3><ol><li>First track</li>'
+            '<li>Second track</li></ol></div></article>', "html.parser")
+        description = build_feed.extract_description(soup)
+        self.assertIn("Size: 274 Mb\n\n\nTracklist:", description)
+        self.assertIn("1. First track", description)
+        self.assertIn("2. Second track", description)
 
 if __name__ == "__main__":
     unittest.main()
