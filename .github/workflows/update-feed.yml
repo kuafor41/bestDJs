@@ -2,13 +2,20 @@ name: Update bestDJs RSS
 
 on:
   workflow_dispatch:
+    inputs:
+      rebuild_all:
+        description: "Rebuild from the current latest five episodes per mixshow"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - "build_feed.py"
       - "tests/test_feed.py"
+      - ".github/workflows/update-feed.yml"
   schedule:
-    - cron: "17 */12 * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: write
@@ -20,7 +27,7 @@ concurrency:
 jobs:
   update-feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,7 +45,10 @@ jobs:
           python -m pip install --upgrade requests beautifulsoup4 playwright
           python -m playwright install --with-deps chromium
 
-      - name: Validate secrets are present
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate required secrets
         env:
           SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
           SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
@@ -47,38 +57,50 @@ jobs:
           test -n "$SOURCE_PASSWORD" || { echo "::error::Missing SOURCE_PASSWORD secret"; exit 1; }
           echo "Required secrets are configured (values are not displayed)."
 
-      - name: Build authenticated RSS feed
+      - name: Build complete incremental mixshow archive
         env:
           SOURCE_USERNAME: ${{ secrets.SOURCE_USERNAME }}
           SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
-          MAX_EPISODES: "50"
-          REQUEST_DELAY_SECONDS: "2.5"
+          REBUILD_ALL: ${{ github.event.inputs.rebuild_all == 'true' }}
+          MAX_REST_PAGES: "600"
+          MAX_DISCOVERED_SHOWS: "300"
+          REQUEST_DELAY_SECONDS: "0.5"
+          REST_REQUEST_DELAY_SECONDS: "0.1"
+          RETRY_MAX_AGE_DAYS: "45"
         run: python build_feed.py
 
-      - name: Validate generated RSS
+      - name: Verify generated production RSS
         run: |
           python - <<'PY'
           import xml.etree.ElementTree as ET
-          from pathlib import Path
-          p = Path("public/rss.xml")
-          root = ET.parse(p).getroot()
+          from urllib.parse import urlparse, parse_qsl
+          root = ET.parse("public/rss.xml").getroot()
           items = root.findall("./channel/item")
-          assert items, "RSS contains no episodes"
+          assert items, "Production RSS contains no episodes"
+          guids = [item.findtext("guid") for item in items]
+          assert len(guids) == len(set(guids)), "Duplicate episode GUIDs found"
           for item in items:
+              title = item.findtext("title") or ""
+              assert title and item.findtext("description") and item.findtext("pubDate"), "Incomplete RSS item"
               enclosure = item.find("enclosure")
-              assert enclosure is not None and enclosure.get("type") == "audio/mpeg", "Missing MP3 enclosure"
-              assert enclosure.get("url", "").lower().split("?", 1)[0].endswith(".mp3"), "Enclosure is not a direct MP3 URL"
-          print(f"RSS validation passed: {len(items)} episodes")
+              assert enclosure is not None and enclosure.get("type") == "audio/mpeg", "Missing audio/mpeg enclosure"
+              parsed = urlparse(enclosure.get("url", ""))
+              assert parsed.path.lower().endswith(".mp3"), f"Enclosure is not a direct MP3 URL: {title}"
+              keys = {key.lower().replace("-", "_") for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+              expiring = {"expires", "expiry", "exp", "token", "signature", "sig", "policy", "key_pair_id",
+                          "x_amz_", "x_goog_", "hdnts", "auth", "st", "et", "e"}
+              assert not any(key in expiring or key.startswith(("x_amz_", "x_goog_")) for key in keys), f"Potentially temporary enclosure URL: {title}"
+          print(f"Production RSS validation passed: {len(items)} episodes")
           PY
 
-      - name: Commit RSS when changed
+      - name: Commit RSS and tracking reports
         run: |
-          if git diff --quiet -- public/rss.xml; then
-            echo "RSS unchanged; no commit needed."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/rss.xml data/retry-queue.csv data/update-report.csv data/show-inventory.csv
+          if git diff --cached --quiet; then
+            echo "RSS and tracking files unchanged; no commit needed."
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add public/rss.xml
-            git commit -m "Update generated podcast RSS"
+            git commit -m "Update bestDJs incremental archive and reports"
             git push
           fi

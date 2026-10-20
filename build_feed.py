@@ -717,90 +717,941 @@ def write_rss(items):
     lines.extend(['</channel>', '</rss>', ''])
     OUT.write_text("\n".join(lines), encoding="utf-8")
 
+
+# Incremental archive implementation. The isolated test workflow and its script remain untouched.
+import csv
+from collections import defaultdict
+from datetime import timedelta
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
+from urllib.parse import urlunparse, parse_qsl
+from zoneinfo import ZoneInfo
+
+REST_URL = BASE + "/wp-json/wp/v2/posts"
+RETRY_CSV = Path("data/retry-queue.csv")
+REPORT_CSV = Path("data/update-report.csv")
+INVENTORY_CSV = Path("data/show-inventory.csv")
+REBUILD_ALL = os.environ.get("REBUILD_ALL", "").strip().lower() in ("1", "true", "yes", "on")
+PER_PAGE = 100
+MAX_REST_PAGES = int(os.environ.get("MAX_REST_PAGES", "600"))
+EPISODES_PER_SHOW = 5
+MAX_SERIES = int(os.environ.get("MAX_DISCOVERED_SHOWS", "300"))
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY_SECONDS", "0.5"))
+REST_DELAY = float(os.environ.get("REST_REQUEST_DELAY_SECONDS", "0.1"))
+RETRY_MAX_AGE_DAYS = int(os.environ.get("RETRY_MAX_AGE_DAYS", "45"))
+RETRY_INITIAL_HOURS = 6
+RETRY_MAX_HOURS = 72
+ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+ET.register_namespace("itunes", ITUNES_NS)
+
+def canonical_url(url: str) -> str:
+    parsed = urlparse(html.unescape((url or "").strip()))
+    if not parsed.scheme:
+        parsed = urlparse(absolute(url))
+    return urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/") + "/", parsed.params, parsed.query, ""))
+
+def safe_url(url: str):
+    parsed = urlparse(url or "")
+    result = {"host": parsed.netloc, "path": parsed.path, "query_present": bool(parsed.query)}
+    if not parsed.query:
+        result["url_if_no_query"] = url
+    return result
+
+def is_temporary_signed_url(url: str) -> bool:
+    keys = [key.lower().replace("-", "_") for key, _ in parse_qsl(urlparse(url).query, keep_blank_values=True)]
+    markers = ("expires", "expiry", "exp", "token", "signature", "sig", "policy",
+               "key_pair_id", "x_amz_", "x_goog_", "hdnts", "auth", "st", "et")
+    return any(key in ("e", "st", "et") or any(key == marker or key.startswith(marker) for marker in markers)
+               for key in keys)
+
+def validate_audio_url(session: requests.Session, url: str, referer: str = SHOWS_URL):
+    """Range-check a single byte and reject HTML/login pages masquerading as an MP3."""
+    response = None
+    try:
+        response = session.get(url, headers={**HEADERS, "Referer": referer, "Range": "bytes=0-0"},
+                               allow_redirects=True, stream=True, timeout=(15, 30))
+        final_url = response.url
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        content_range = response.headers.get("Content-Range", "")
+        content_length = response.headers.get("Content-Length", "")
+        length = None
+        match = re.search(r"/(\d+|\*)$", content_range)
+        if match and match.group(1) != "*":
+            length = int(match.group(1))
+        elif content_length.isdigit() and response.status_code == 200:
+            length = int(content_length)
+        html_response = content_type in ("text/html", "application/xhtml+xml") or "html" in content_type
+        valid_type = content_type.startswith("audio/") or (
+            is_mp3(final_url) and not html_response and not content_type.startswith("text/")
+        )
+        valid = response.status_code in (200, 206) and valid_type and is_mp3(final_url)
+        return {"valid": valid, "url": final_url, "length": length, "status": response.status_code,
+                "content_type": content_type, "content_range": content_range}
+    except requests.RequestException as exc:
+        return {"valid": False, "url": url, "length": None, "status": None, "error": type(exc).__name__}
+    finally:
+        if response is not None:
+            response.close()
+
+def extract_description(soup: BeautifulSoup) -> str:
+    """Match the working test-feed formatter, including Size-to-PARTS spacing."""
+    entry = soup.select_one(".entry-content") or soup.select_one("article")
+    if not entry:
+        return ""
+    def visible_text(node):
+        clone = BeautifulSoup(str(node), "html.parser")
+        for br in clone.find_all("br"):
+            br.replace_with("\n")
+        for li in clone.find_all("li"):
+            li.insert_before("\n")
+            li.append("\n")
+        text = clone.get_text("", strip=False)
+        lines = []
+        for line in text.replace("\r", "").split("\n"):
+            line = re.sub(r"[\t ]+", " ", line).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+    nodes = list(entry.children)
+    start_index = None
+    for index, node in enumerate(nodes):
+        if not getattr(node, "get_text", None):
+            continue
+        if re.match(r"^Date\s*:", visible_text(node), re.I):
+            start_index = index
+            break
+    if start_index is None:
+        for selector in ("p", "div", "section"):
+            for node in entry.select(selector):
+                text = visible_text(node)
+                if re.match(r"^Date\s*:", text, re.I):
+                    return text[:10000]
+        # Keep a descriptive fallback if the page layout lacks a Date block.
+        return clean_text(entry.get_text(" ", strip=True))[:10000]
+    chunks = []
+    for node in nodes[start_index:]:
+        if getattr(node, "get", None) and node.get("id") in ("download-link", "advert", "advert-mobile"):
+            break
+        if getattr(node, "get", None) and node.name in ("script", "style", "nav", "footer"):
+            continue
+        text = visible_text(node) if getattr(node, "get_text", None) else str(node).strip()
+        if not text or text.upper() == "DOWNLOAD" or text.lower().startswith("report broken link"):
+            continue
+        if chunks and text == chunks[-1]:
+            continue
+        chunks.append(text)
+    description = "\n".join(chunks).strip()
+    size_line = re.search(r"(?im)^Size\s*:[^\n]*", description)
+    if size_line:
+        tail = description[size_line.end():]
+        if re.search(r"(?im)^\s*(?:Tracklist\s*:|PARTS\s*$|\d{1,3}[.)]\s+)", tail):
+            description = description[:size_line.end()].rstrip() + "\n\n\n" + tail.lstrip("\r\n")
+    return description[:10000] if description else ""
+
+def parse_datetime_value(value):
+    if not value:
+        return None
+    value = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        pass
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        pass
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d",
+                "%d-%m-%Y %H:%M", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+def page_date(text: str, soup: BeautifulSoup, rest_date: str):
+    patterns = (
+        (r"\bAdded\s*:\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})", "Added"),
+        (r"\bDate\s*:\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})", "Date"),
+    )
+    for pattern, source in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            parsed = parse_datetime_value(match.group(1))
+            if parsed:
+                return parsed, source
+    for node in soup.select("time[datetime], meta[property='article:published_time'], meta[name='date'], meta[itemprop='datePublished']"):
+        value = node.get("datetime") or node.get("content")
+        parsed = parse_datetime_value(value)
+        if parsed:
+            return parsed, "page_metadata"
+    parsed = parse_datetime_value(rest_date)
+    if parsed:
+        return parsed, "wordpress_date_fallback"
+    return None, "missing"
+
+def extract_title(soup: BeautifulSoup, fallback: str):
+    for selector in ("h1.entry-title", "article h1", ".entry-title", "h1"):
+        node = soup.select_one(selector)
+        value = clean_text(node.get_text(" ", strip=True)) if node else ""
+        if value:
+            return re.sub(r"\s*[|–-]\s*Top\s*DJ\s*Mixes.*$", "", value, flags=re.I).strip() or fallback
+    node = soup.select_one('meta[property="og:title"]')
+    if node and node.get("content"):
+        return clean_text(node["content"])
+    return fallback
+
+def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
+    candidates_by_url = {}
+    def normalize(value):
+        value = re.sub(r"\.(?:jpe?g|png|webp)(?:$|\?).*$", "", value, flags=re.I)
+        value = re.sub(r"\b(?:episode|ep|show|radio|podcast)\s*#?\d+\b", " ", value, flags=re.I)
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    show_name = re.sub(r"\s+(?:episode\s*)?#?\d+[a-z]?$", "", episode_title, flags=re.I).strip()
+    show_tokens = set(normalize(show_name).split())
+    def add(raw, source, alt="", title="", width=0, height=0):
+        raw = html.unescape(str(raw or "").strip())
+        if not raw or raw.startswith("data:"):
+            return
+        url = urljoin(page_url, raw)
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not re.search(r"\.(?:jpe?g|png|webp)(?:$|\?)", parsed.path, re.I):
+            return
+        path_label = normalize(parsed.path.rsplit("/", 1)[-1])
+        label = normalize(" ".join((path_label, alt, title)))
+        label_tokens = set(label.split())
+        overlap = len(show_tokens & label_tokens)
+        score = 0
+        if show_tokens and overlap:
+            score += 100 + 15 * overlap
+            if show_tokens.issubset(label_tokens):
+                score += 100
+        if source == "content":
+            score += 20
+        if width >= 250 and height >= 250:
+            score += 5
+        if any(token in label for token in ("logo", "avatar", "favicon", "banner", "advert", "spinner", "placeholder")):
+            score -= 200
+        candidates_by_url[url] = max(score, candidates_by_url.get(url, -999))
+    for selector in ('meta[property="og:image"]', 'meta[property="og:image:secure_url"]',
+                     'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]'):
+        node = soup.select_one(selector)
+        if node and node.get("content"):
+            add(node["content"], "meta", node.get("alt", ""), node.get("title", ""))
+    entry = soup.select_one(".entry-content") or soup.select_one("article")
+    if entry:
+        for node in entry.select("img"):
+            raw = (node.get("data-src") or node.get("data-lazy-src") or node.get("data-original")
+                   or node.get("src") or "")
+            width = int(node.get("width", "0")) if str(node.get("width", "0")).isdigit() else 0
+            height = int(node.get("height", "0")) if str(node.get("height", "0")).isdigit() else 0
+            add(raw, "content", node.get("alt", ""), node.get("title", ""), width, height)
+            srcset = node.get("srcset", "")
+            if srcset:
+                last = srcset.split(",")[-1].strip().split(" ")[0]
+                add(last, "content", node.get("alt", ""), node.get("title", ""), width, height)
+    ranked = sorted(candidates_by_url.items(), key=lambda pair: pair[1], reverse=True)
+    return ranked[0][0] if ranked and ranked[0][1] >= 100 else None
+
+def is_episode_page(soup: BeautifulSoup):
+    control = soup.select_one("a.wpdm-download-link.download-on-click")
+    if not control:
+        return False
+    body = clean_text((soup.select_one(".entry-content") or soup).get_text(" ", strip=True)).lower()
+    return ("audio:" in body and "size:" in body) or "parts" in body
+
+def transfer_cookies(context, session):
+    for cookie in context.cookies():
+        try:
+            session.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain"),
+                                path=cookie.get("path", "/"), secure=cookie.get("secure", False))
+        except Exception:
+            continue
+
+def login_in_browser(page, context, session, PlaywrightTimeoutError):
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(1000)
+    body = clean_text(page.locator("body").inner_text(timeout=10000)).lower()
+    if "spam detected" in body:
+        raise RuntimeError("TopDJMixes displayed Spam detected before login; no credentials were submitted.")
+    user_field = page.locator('input[name="user_login"]:visible').last
+    pass_field = page.locator('input[name="user_pass"]:visible').last
+    for wait_step in range(1, 10):
+        if user_field.count() and pass_field.count():
+            break
+        if wait_step < 9:
+            page.wait_for_timeout(5000)
+    if not user_field.count() or not pass_field.count():
+        body = clean_text(page.locator("body").inner_text(timeout=10000))
+        log("login_form_missing", title=page.title(), path=urlparse(page.url).path,
+            body_excerpt=body[:300], credentials_submitted=False)
+        raise RuntimeError("TopDJMixes did not present its normal login form; stopped before submitting credentials.")
+    form = pass_field.locator("xpath=ancestor::form[1]")
+    try:
+        form.locator('input#arm_form_submission_key[name]:not([name=""])').wait_for(state="attached", timeout=15000)
+    except PlaywrightTimeoutError as exc:
+        log("login_form_not_initialized", title=page.title(), form_id=form.get_attribute("id") or "")
+        raise RuntimeError("ARM Membership did not initialize its submission key; no login was submitted.") from exc
+    honeypot = form.locator('input[name="arm_filter_input"]')
+    if honeypot.count() and (honeypot.first.input_value() or "").strip():
+        raise RuntimeError("ARM honeypot is not empty; refusing to submit login.")
+    user_field.click()
+    user_field.press_sequentially(USER, delay=30)
+    pass_field.click()
+    pass_field.press_sequentially(PASSWORD, delay=30)
+    page.wait_for_timeout(400)
+    submit = form.locator('button[type="submit"]:visible, input[type="submit"]:visible, button:not([type]):visible')
+    if not submit.count():
+        raise RuntimeError("TopDJMixes login submit control is missing; no login request was made.")
+    submit.last.click()
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(1000)
+    body = clean_text(page.locator("body").inner_text(timeout=10000))
+    lowered = body.lower()
+    auth_cookies = sorted({cookie["name"] for cookie in context.cookies()
+                           if cookie["name"].startswith(("wordpress_logged_in_", "wordpress_sec_"))})
+    logged_out_visible = page.get_by_text(re.compile(r"\blog ?out\b", re.I)).count() > 0
+    login_form_visible = page.locator('input[name="user_login"]:visible').count() > 0
+    log("browser_login_result", title=page.title(), path=urlparse(page.url).path,
+        auth_cookie_names=auth_cookies, logged_out_visible=logged_out_visible,
+        login_form_visible=login_form_visible, spam_detected="spam detected" in lowered,
+        invalid_credentials_marker=any(marker in lowered for marker in (
+            "incorrect password", "invalid username", "invalid password",
+            "username or password is incorrect", "too many login attempts")))
+    if "spam detected" in lowered:
+        raise RuntimeError("TopDJMixes rejected the login submission as Spam detected; stopping.")
+    if not auth_cookies or (login_form_visible and not logged_out_visible):
+        raise RuntimeError("TopDJMixes did not confirm an authenticated session.")
+    transfer_cookies(context, session)
+    probe_url = BASE + "/the-midnight-project-228/"
+    probe = session.get(probe_url, headers={"Referer": LOGIN_URL}, timeout=45)
+    probe.raise_for_status()
+    probe_soup = BeautifulSoup(probe.text, "html.parser")
+    probe_body = clean_text((probe_soup.select_one(".entry-content") or probe_soup).get_text(" ", strip=True)).lower()
+    gate = "please login to download or create a free account" in probe_body
+    log("http_session_probe", status=probe.status_code, path=urlparse(probe.url).path,
+        download_gate=gate, auth_cookie_count=len(auth_cookies))
+    if gate:
+        raise RuntimeError("Transferred HTTP session does not retain Download access.")
+
+def discover_episode_posts(session):
+    """Read the full WordPress post index; grouping is derived from numbered episode slug prefixes."""
+    posts_by_url = {}
+    total_pages = None
+    total_posts = None
+    pages_read = 0
+    for page_num in range(1, MAX_REST_PAGES + 1):
+        params = {"per_page": PER_PAGE, "page": page_num, "orderby": "date", "order": "desc",
+                  "_fields": "link,date,date_gmt,slug,title,excerpt"}
+        try:
+            response = session.get(REST_URL, params=params, headers={"Referer": SHOWS_URL}, timeout=35)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"WordPress REST page {page_num} request failed: {type(exc).__name__}") from exc
+        if response.status_code == 400 and page_num > 1:
+            break
+        response.raise_for_status()
+        try:
+            page_posts = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"WordPress REST page {page_num} did not return JSON.") from exc
+        if not isinstance(page_posts, list) or not page_posts:
+            break
+        pages_read += 1
+        try:
+            total_pages = int(response.headers.get("X-WP-TotalPages", total_pages or 0)) or total_pages
+            total_posts = int(response.headers.get("X-WP-Total", total_posts or 0)) or total_posts
+        except (TypeError, ValueError):
+            pass
+        for post in page_posts:
+            link = post.get("link", "")
+            parsed = urlparse(link)
+            if parsed.netloc.lower() not in ("www.topdjmixes.com", "topdjmixes.com"):
+                continue
+            canonical = canonical_url(link)
+            if canonical not in posts_by_url:
+                post["link"] = canonical
+                posts_by_url[canonical] = post
+        if page_num == 1 or page_num % 25 == 0 or (total_pages and page_num >= total_pages):
+            log("rest_discovery_progress", page=page_num, total_pages=total_pages,
+                source_posts_seen=len(posts_by_url), advertised_total_posts=total_posts)
+        if total_pages and page_num >= total_pages:
+            break
+        if not total_pages and len(page_posts) < PER_PAGE:
+            break
+        if REST_DELAY:
+            time.sleep(REST_DELAY)
+    if total_pages and pages_read >= MAX_REST_PAGES and pages_read < total_pages:
+        raise RuntimeError(f"REST scan safety limit reached ({pages_read}/{total_pages} pages); refusing a partial archive.")
+    if not posts_by_url:
+        raise RuntimeError("WordPress REST returned no episode candidates.")
+    log("rest_discovery_complete", pages_read=pages_read, advertised_total_pages=total_pages,
+        source_posts=len(posts_by_url))
+    return list(posts_by_url.values())
+
+def series_key_for_post(post):
+    slug = str(post.get("slug") or urlparse(post.get("link", "")).path.strip("/").split("/")[-1]).lower().strip("/")
+    match = re.fullmatch(r"(?P<series>[a-z0-9][a-z0-9-]*?)-(?P<episode>\d+[a-z]?)", slug, flags=re.I)
+    if not match:
+        return None
+    key = match.group("series").strip("-")
+    if len(key) < 2 or key in {"episode", "mix", "mixshow", "show", "news", "review", "top"}:
+        return None
+    return key
+
+def rest_date(post):
+    return parse_datetime_value(post.get("date_gmt") or post.get("date")) or datetime.min.replace(tzinfo=timezone.utc)
+
+def rest_title(post):
+    title = post.get("title", "")
+    if isinstance(title, dict):
+        title = title.get("rendered", "")
+    return clean_text(BeautifulSoup(html.unescape(str(title)), "html.parser").get_text(" ", strip=True))
+
+def group_posts_by_series(posts):
+    groups = defaultdict(list)
+    for post in posts:
+        key = series_key_for_post(post)
+        if key:
+            groups[key].append(post)
+    for key in groups:
+        groups[key].sort(key=rest_date, reverse=True)
+    if len(groups) > MAX_SERIES:
+        raise RuntimeError(f"Found {len(groups)} numbered-slug groups, above safety limit {MAX_SERIES}; refusing a misclassified archive.")
+    log("series_grouping_complete", candidate_series=len(groups),
+        series_sample=[{"slug": key, "latest_title": rest_title(rows[0])} for key, rows in list(groups.items())[:12]])
+    return groups
+
+def inspect_episode_post(session, post, series_key):
+    url = post["link"]
+    fallback_title = rest_title(post) or urlparse(url).path.strip("/").split("/")[-1]
+    try:
+        response = session.get(url, headers={"Referer": SHOWS_URL}, timeout=35)
+    except requests.RequestException as exc:
+        return None, f"episode_page_request_{type(exc).__name__}", True
+    if response.status_code >= 400:
+        return None, f"episode_page_http_{response.status_code}", True
+    soup = BeautifulSoup(response.text, "html.parser")
+    if not is_episode_page(soup):
+        return None, "not_an_episode_page", False
+    title = extract_title(soup, fallback_title)
+    entry = soup.select_one(".entry-content") or soup
+    visible_text = clean_text(entry.get_text(" ", strip=True))
+    date, date_source = page_date(visible_text, soup, post.get("date_gmt") or post.get("date") or "")
+    if not date:
+        return None, "episode_date_missing", True
+    description = extract_description(soup) or title
+    cover = extract_cover(soup, response.url, title)
+    page_url = canonical_url(response.url)
+    item = {
+        "title": title, "page": page_url, "guid": page_url, "slug": post.get("slug", ""),
+        "series_key": series_key,
+        "series_title": re.sub(r"\s+(?:episode\s*)?#?\d+[a-z]?$", "", title, flags=re.I).strip() or series_key.replace("-", " ").title(),
+        "date": date, "date_source": date_source, "description": description, "cover": cover,
+        "audio": "", "audio_length": 0,
+    }
+    log("episode_page_parsed", show=series_key, page=safe_url(page_url), title=title,
+        date=date.isoformat(), date_source=date_source, description_chars=len(description),
+        cover_found=bool(cover),
+        tracklist_found=bool(re.search(r"(?im)^\s*(?:PARTS|Tracklist:|\d{1,3}[.)]\s+)", description)))
+    return item, None, True
+
+def click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError):
+    """Click the actual visible Download button and trace redirects without fetching MP3 bytes."""
+    try:
+        page.goto(item["page"], wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        log("episode_browser_navigation_error", title=item["title"], page=safe_url(item["page"]), error=type(exc).__name__)
+        return None, None
+    try:
+        page.locator("a.wpdm-download-link.download-on-click:visible").wait_for(state="attached", timeout=12000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(350)
+    body = clean_text(page.locator("body").inner_text(timeout=10000)).lower()
+    if "please login to download or create a free account" in body:
+        log("episode_browser_login_gate", title=item["title"], page=safe_url(item["page"]))
+        return None, None
+    button = page.locator("a.wpdm-download-link.download-on-click:visible").first
+    if not button.count():
+        log("episode_download_button_missing", title=item["title"], page=safe_url(item["page"]))
+        return None, None
+    captured = []
+    redirect_trace = []
+    def route_download(route):
+        request = route.request
+        parsed = urlparse(request.url)
+        if parsed.netloc.lower() in ("www.topdjmixes.com", "topdjmixes.com") and parsed.path.startswith("/download/"):
+            current_url = request.url
+            previous_url = request.url
+            headers = dict(request.headers)
+            try:
+                browser_cookies = context.cookies("https://www.topdjmixes.com")
+                cookie_values = {cookie["name"]: cookie["value"] for cookie in browser_cookies}
+                existing = headers.get("cookie", headers.get("Cookie", ""))
+                for pair in existing.split(";"):
+                    if "=" in pair:
+                        name, value = pair.split("=", 1)
+                        cookie_values.setdefault(name.strip(), value.strip())
+                if cookie_values:
+                    headers["cookie"] = "; ".join(f"{key}={value}" for key, value in cookie_values.items())
+            except Exception:
+                pass
+            for hop in range(1, 7):
+                if is_mp3(current_url):
+                    captured.append(current_url)
+                    break
+                response = None
+                try:
+                    hop_headers = dict(headers)
+                    if previous_url:
+                        hop_headers["referer"] = previous_url
+                    response = route.fetch(url=current_url, headers=hop_headers, max_redirects=0, timeout=15000)
+                    status = response.status
+                    response_headers = response.headers
+                    location = response_headers.get("location", "")
+                    content_type = response_headers.get("content-type", "").split(";", 1)[0].lower()
+                    redirect_trace.append({"hop": hop, "status": status, "url": safe_url(response.url),
+                                           "content_type": content_type, "location_present": bool(location)})
+                    set_cookie = response_headers.get("set-cookie", "")
+                    if set_cookie:
+                        try:
+                            jar = SimpleCookie()
+                            jar.load(set_cookie)
+                            values = {}
+                            for pair in hop_headers.get("cookie", "").split(";"):
+                                if "=" in pair:
+                                    name, value = pair.split("=", 1)
+                                    values[name.strip()] = value.strip()
+                            for name, morsel in jar.items():
+                                values[name] = morsel.value
+                            headers["cookie"] = "; ".join(f"{name}={value}" for name, value in values.items())
+                        except Exception:
+                            pass
+                    if status in (301, 302, 303, 307, 308) and location:
+                        next_url = urljoin(response.url, location)
+                        if is_mp3(next_url):
+                            captured.append(next_url)
+                            break
+                        previous_url, current_url = response.url, next_url
+                        continue
+                    break
+                except Exception as exc:
+                    redirect_trace.append({"hop": hop, "error": type(exc).__name__, "url": safe_url(current_url)})
+                    break
+                finally:
+                    if response is not None:
+                        try:
+                            response.dispose()
+                        except Exception:
+                            pass
+            route.abort()
+            return
+        if is_mp3(request.url) or parsed.netloc.lower() == "files.topdjmixes.com":
+            captured.append(request.url)
+            route.abort()
+            return
+        route.continue_()
+    click_error = None
+    context.route("**/*", route_download)
+    try:
+        button.click(timeout=10000)
+        page.wait_for_timeout(500)
+    except Exception as exc:
+        click_error = type(exc).__name__
+    finally:
+        try:
+            context.unroute("**/*", route_download)
+        except Exception:
+            pass
+    unique_urls = list(dict.fromkeys(captured))
+    if not unique_urls:
+        log("episode_download_click_no_mp3", title=item["title"], page=safe_url(item["page"]),
+            click_error=click_error, redirect_trace=redirect_trace[:8])
+        return None, None
+    audio_url = unique_urls[0]
+    checked = validate_audio_url(session, audio_url, referer=item["page"])
+    final_url = checked.get("url", audio_url)
+    final = urlparse(final_url)
+    temporary = is_temporary_signed_url(final_url)
+    log("episode_audio_range_check", title=item["title"], page=safe_url(item["page"]),
+        audio_url=safe_url(audio_url), valid=checked.get("valid"), status=checked.get("status"),
+        content_type=checked.get("content_type"), content_range=checked.get("content_range"),
+        length=checked.get("length"), final_host=final.netloc, final_path=final.path,
+        final_query_present=bool(final.query), temporary_signature=temporary,
+        click_error=click_error, redirect_trace=redirect_trace[:8])
+    if not checked.get("valid") or not is_mp3(final_url) or temporary:
+        if temporary:
+            log("audio_url_rejected_temporary_signature", title=item["title"], final_url=safe_url(final_url))
+        return None, None
+    return final_url, checked.get("length")
+
+def read_existing_feed():
+    if REBUILD_ALL or not OUT.exists() or OUT.stat().st_size == 0:
+        return []
+    root = ET.parse(OUT).getroot()
+    items = []
+    for node in root.findall("./channel/item"):
+        title = node.findtext("title") or ""
+        page = node.findtext("link") or node.findtext("guid") or ""
+        guid = node.findtext("guid") or page
+        pub_date = parse_datetime_value(node.findtext("pubDate")) or datetime.min.replace(tzinfo=timezone.utc)
+        enclosure = node.find("enclosure")
+        audio = enclosure.get("url", "") if enclosure is not None else ""
+        if not title or not page or not audio:
+            continue
+        image_node = node.find(f"{{{ITUNES_NS}}}image")
+        items.append({"title": title, "page": canonical_url(page), "guid": canonical_url(guid),
+                      "date": pub_date, "description": node.findtext("description") or title,
+                      "cover": image_node.get("href", "") if image_node is not None else "",
+                      "audio": audio, "audio_length": int(enclosure.get("length", "0") or 0)})
+    return items
+
+RETRY_FIELDS = ["episode_url", "show_slug", "show_title", "episode_title", "source_date",
+                "first_seen_utc", "last_attempt_utc", "attempts", "next_retry_utc", "last_error", "status"]
+
+def read_retry_queue():
+    if REBUILD_ALL or not RETRY_CSV.exists():
+        return {}
+    rows = {}
+    with RETRY_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            url = canonical_url(row.get("episode_url", ""))
+            if url:
+                row["episode_url"] = url
+                rows[url] = row
+    return rows
+
+def write_retry_queue(queue):
+    RETRY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with RETRY_CSV.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RETRY_FIELDS)
+        writer.writeheader()
+        for row in sorted(queue.values(), key=lambda item: (item.get("first_seen_utc", ""), item.get("episode_url", ""))):
+            writer.writerow({field: row.get(field, "") for field in RETRY_FIELDS})
+
+def utc_iso(value):
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+def add_retry(queue, url, series_key, series_title, episode_title, source_date, error, now):
+    url = canonical_url(url)
+    if url in queue:
+        return
+    queue[url] = {
+        "episode_url": url, "show_slug": series_key or "", "show_title": series_title or series_key or "",
+        "episode_title": episode_title or urlparse(url).path.strip("/"),
+        "source_date": utc_iso(source_date) if isinstance(source_date, datetime) else str(source_date or ""),
+        "first_seen_utc": utc_iso(now), "last_attempt_utc": utc_iso(now), "attempts": "1",
+        "next_retry_utc": utc_iso(now + timedelta(hours=RETRY_INITIAL_HOURS)),
+        "last_error": error, "status": "waiting",
+    }
+    log("retry_queue_added", page=safe_url(url), show=series_key, error=error)
+
+def update_retry_failure(row, error, now):
+    first_seen = parse_datetime_value(row.get("first_seen_utc")) or now
+    attempts = int(row.get("attempts") or 0) + 1
+    row["attempts"] = str(attempts)
+    row["last_attempt_utc"] = utc_iso(now)
+    row["last_error"] = error
+    if now - first_seen >= timedelta(days=RETRY_MAX_AGE_DAYS):
+        row["status"] = "expired"
+        row["next_retry_utc"] = ""
+    else:
+        hours = min(RETRY_MAX_HOURS, RETRY_INITIAL_HOURS * (2 ** min(attempts - 1, 10)))
+        row["next_retry_utc"] = utc_iso(now + timedelta(hours=hours))
+        row["status"] = "waiting"
+    log("retry_queue_attempt_failed", page=safe_url(row.get("episode_url", "")),
+        attempts=attempts, status=row["status"], error=error, next_retry=row.get("next_retry_utc", ""))
+
+def retry_is_due(row, now):
+    if row.get("status", "waiting") != "waiting":
+        return False
+    first_seen = parse_datetime_value(row.get("first_seen_utc")) or now
+    if now - first_seen >= timedelta(days=RETRY_MAX_AGE_DAYS):
+        row["status"] = "expired"
+        row["next_retry_utc"] = ""
+        return False
+    next_retry = parse_datetime_value(row.get("next_retry_utc"))
+    return next_retry is None or next_retry <= now
+
+def write_rss(items):
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    items.sort(key=lambda item: item["date"], reverse=True)
+    now = datetime.now(timezone.utc)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">',
+        '<channel>', '<title>bestDJs Podcast</title>',
+        f'<link>{xml_escape(SHOWS_URL)}</link>',
+        '<description>bestDJs Podcast — authenticated TopDJMixes mixshows with directly verified MP3 enclosures.</description>',
+        '<language>en-us</language>', '<itunes:author>bestDJs</itunes:author>',
+        '<itunes:category text="Music"/>', '<itunes:explicit>no</itunes:explicit>',
+        f'<lastBuildDate>{format_datetime(now, usegmt=True)}</lastBuildDate>',
+    ]
+    channel_cover = next((item.get("cover") for item in items if item.get("cover")), "")
+    if channel_cover:
+        lines.append(f'<itunes:image href="{xml_escape(channel_cover)}"/>')
+    for item in items:
+        date = item.get("date") or datetime.min.replace(tzinfo=timezone.utc)
+        title = item.get("title") or item.get("guid") or item.get("page")
+        description = item.get("description") or title
+        lines.extend([
+            '<item>', f'<title>{xml_escape(title)}</title>',
+            f'<link>{xml_escape(item.get("page") or item.get("guid"))}</link>',
+            f'<guid isPermaLink="true">{xml_escape(item.get("guid") or item.get("page"))}</guid>',
+            f'<pubDate>{format_datetime(date.astimezone(timezone.utc), usegmt=True)}</pubDate>',
+            f'<description>{xml_escape(description)}</description>',
+        ])
+        if item.get("cover"):
+            lines.append(f'<itunes:image href="{xml_escape(item["cover"])}"/>')
+        lines.extend([
+            f'<enclosure url="{xml_escape(item["audio"])}" length="{int(item.get("audio_length") or 0)}" type="audio/mpeg"/>',
+            '<itunes:explicit>no</itunes:explicit>', '</item>',
+        ])
+    lines.extend(["</channel>", "</rss>", ""])
+    OUT.write_text("\n".join(lines), encoding="utf-8")
+
+def validate_feed(items):
+    root = ET.parse(OUT).getroot()
+    entries = root.findall("./channel/item")
+    if not entries:
+        raise RuntimeError("Production RSS has no valid episodes; refusing an empty published feed.")
+    dates, guids = [], set()
+    for entry in entries:
+        title = entry.findtext("title") or ""
+        if not title or not entry.findtext("description") or not entry.findtext("pubDate") or not entry.findtext("guid"):
+            raise RuntimeError(f"RSS item is missing title, description, date, or GUID: {title}")
+        guid = entry.findtext("guid")
+        if guid in guids:
+            raise RuntimeError(f"Duplicate RSS GUID detected: {guid}")
+        guids.add(guid)
+        enclosure = entry.find("enclosure")
+        if enclosure is None or enclosure.get("type") != "audio/mpeg":
+            raise RuntimeError(f"RSS item missing audio/mpeg enclosure: {title}")
+        url = enclosure.get("url", "")
+        if not is_mp3(url) or is_temporary_signed_url(url):
+            raise RuntimeError(f"RSS item does not have a stable direct MP3 URL: {title}")
+        parsed = parse_datetime_value(entry.findtext("pubDate"))
+        if not parsed:
+            raise RuntimeError(f"RSS item has an invalid publication date: {title}")
+        dates.append(parsed)
+    if dates != sorted(dates, reverse=True):
+        raise RuntimeError("RSS items are not sorted newest to oldest.")
+    log("rss_validation_passed", path=str(OUT), items=len(entries),
+        newest_date=dates[0].isoformat(), oldest_date=dates[-1].isoformat(),
+        unique_guids=len(guids), sorted_newest_to_oldest=True)
+
+def write_inventory(show_rows, now):
+    INVENTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["run_at_utc", "show_slug", "show_title", "source_episode_candidates",
+              "episode_pages_selected", "added_this_run", "already_in_feed", "queued_failures",
+              "latest_selected_title", "latest_selected_date", "selected_titles"]
+    with INVENTORY_CSV.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in sorted(show_rows, key=lambda item: item["show_slug"]):
+            writer.writerow({"run_at_utc": utc_iso(now),
+                **{key: row.get(key, "") for key in fields if key != "run_at_utc"}})
+
+def append_update_report(now, rebuild, source_posts, show_count, selected_count,
+                         added_items, retry_attempted, recovered_count, queue, failures):
+    REPORT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["date_tr", "time_tr", "run_type", "mixshows_discovered", "source_posts_scanned",
+              "episodes_selected", "added_count", "retry_attempted", "recovered_count",
+              "failed_links", "retry_waiting", "retry_expired", "result", "episode_titles"]
+    local = now.astimezone(ZoneInfo("Europe/Istanbul"))
+    waiting = sum(1 for row in queue.values() if row.get("status") == "waiting")
+    expired = sum(1 for row in queue.values() if row.get("status") == "expired")
+    titles = "; ".join(item["title"] for item in added_items) if added_items else "No new episodes"
+    row = {"date_tr": local.strftime("%d.%m.%Y"), "time_tr": local.strftime("%H:%M:%S"),
+        "run_type": "full_rebuild" if rebuild else "incremental", "mixshows_discovered": show_count,
+        "source_posts_scanned": source_posts, "episodes_selected": selected_count,
+        "added_count": len(added_items), "retry_attempted": retry_attempted,
+        "recovered_count": recovered_count, "failed_links": failures, "retry_waiting": waiting,
+        "retry_expired": expired, "result": "Episodes added" if added_items else "No new episodes",
+        "episode_titles": titles}
+    new_file = not REPORT_CSV.exists() or REPORT_CSV.stat().st_size == 0
+    with REPORT_CSV.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        writer.writerow(row)
+
 def main():
     if not USER or not PASSWORD:
         raise RuntimeError("SOURCE_USERNAME and SOURCE_PASSWORD GitHub Actions secrets are required.")
+    if MAX_REST_PAGES < 1 or MAX_SERIES < 1:
+        raise RuntimeError("MAX_REST_PAGES and MAX_DISCOVERED_SHOWS must be positive.")
+    now = datetime.now(timezone.utc)
     session = requests.Session()
     session.headers.update(HEADERS)
     configure_retries(session)
-    listing, browser_catalog_html = authenticate(session)
-    # Prefer catalogue links captured from the authenticated browser, then merge HTTP links.
-    browser_soup = BeautifulSoup(browser_catalog_html, "html.parser")
-    catalog_soup = BeautifulSoup(listing.text, "html.parser")
-    show_links = extract_mixshow_links(browser_soup, SHOWS_URL)
-    browser_show_count = len(show_links)
-    if len(show_links) < 5:
-        http_show_links = extract_mixshow_links(catalog_soup, listing.url)
-        show_links.update({u: t for u, t in http_show_links.items() if u not in show_links})
-    log("catalog_parser_probe", browser_show_count=browser_show_count,
-        http_show_count=len(extract_mixshow_links(catalog_soup, listing.url)),
-        browser_anchor_count=len(browser_soup.select("a[href]")))
-    # The catalog body can be JS-rendered or sparse in plain HTTP responses. The login
-    # page footer contains a second directory of mixshow links, so use it as a fallback.
-    if len(show_links) < 5:
-        fallback = session.get(LOGIN_URL, headers={"Referer": SHOWS_URL}, timeout=35)
-        fallback.raise_for_status()
-        fallback_links = extract_mixshow_links(BeautifulSoup(fallback.text, "html.parser"), fallback.url)
-        # Merge fallback links; never discard links already extracted from the authenticated browser.
-        show_links.update({u: t for u, t in fallback_links.items() if u not in show_links})
-        log("catalog_fallback", status=fallback.status_code,
-            content_length=len(fallback.text), fallback_show_count=len(fallback_links),
-            fallback_samples=list(fallback_links.items())[:10],
-            title=clean_text(BeautifulSoup(fallback.text, "html.parser").title.get_text(" ", strip=True))
-            if BeautifulSoup(fallback.text, "html.parser").title else "")
-    log("shows_discovered", count=len(show_links), sample=list(show_links.items())[:5],
-        catalog_html_length=len(listing.text))
-    if not show_links:
-        raise RuntimeError("No mixshow archive links discovered in the catalog or login-page directory.")
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    except ImportError as exc:
+        raise RuntimeError("Playwright is required for authenticated Download-button clicks.") from exc
 
-    # Each mixshow archive lists its own episode pages. Sample the newest four links
-    # from each archive so one show cannot monopolize the feed.
-    episode_links = {}
-    max_shows = int(os.environ.get("MAX_SHOWS", "250"))
-    per_show = int(os.environ.get("EPISODES_PER_SHOW", "4"))
-    for show_index, (show_url, show_title) in enumerate(show_links.items(), 1):
-        if show_index > max_shows:
-            break
-        try:
-            show_response = session.get(show_url, headers={"Referer": SHOWS_URL}, timeout=35)
-            show_response.raise_for_status()
-            show_soup = BeautifulSoup(show_response.text, "html.parser")
-            found = extract_show_links(show_soup, show_response.url)
-            for episode_url, episode_title in list(found.items())[:per_show]:
-                episode_links.setdefault(episode_url, episode_title)
-            if show_index % 25 == 0:
-                log("show_progress", checked=show_index, episode_pages=len(episode_links))
-        except (requests.RequestException, ValueError) as exc:
-            log("show_error", url=show_url, error=type(exc).__name__)
-        time.sleep(float(os.environ.get("REQUEST_DELAY_SECONDS", "2.5")))
-    log("episode_pages_discovered", count=len(episode_links), sample=list(episode_links.items())[:5])
-    if not episode_links:
-        raise RuntimeError("No episode pages were discovered inside the mixshow archive pages.")
+    existing_items = read_existing_feed()
+    existing_by_guid = {canonical_url(item.get("guid") or item["page"]): item for item in existing_items}
+    queue_at_start = read_retry_queue()
+    queue = dict(queue_at_start)
+    if REBUILD_ALL:
+        log("full_rebuild_requested", existing_feed_items=len(existing_items), previous_retry_items=len(queue_at_start))
+        existing_items, existing_by_guid, queue, queue_at_start = [], {}, {}, {}
 
-    episodes = []
-    errors = 0
-    for index, (url, title) in enumerate(episode_links.items(), 1):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(user_agent=HEADERS["User-Agent"], accept_downloads=False)
+        page = context.new_page()
         try:
-            item = fetch_episode(session, url, title)
-            if item:
-                episodes.append(item)
-        except (requests.RequestException, ValueError) as exc:
-            errors += 1
-            log("episode_error", url=url, error=type(exc).__name__)
-        if index % 10 == 0:
-            log("progress", checked=index, found=len(episodes), errors=errors)
-        if len(episodes) >= MAX_EPISODES:
-            break
-        time.sleep(float(os.environ.get("REQUEST_DELAY_SECONDS", "2.5")))
-    if not episodes:
-        raise RuntimeError("Episode pages were discovered, but no direct MP3 URLs were exposed to the crawler. Check login/download authorization or the Download-button redirect.")
-    episodes.sort(key=lambda x: x["date"], reverse=True)
-    write_rss(episodes)
-    log("feed_written", file=str(OUT), episodes=len(episodes), errors=errors,
-        newest=episodes[0]["title"], newest_audio_host=urlparse(episodes[0]["audio"]).netloc)
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-            f.write(f"episode_count={len(episodes)}\n")
+            login_in_browser(page, context, session, PlaywrightTimeoutError)
+            posts = discover_episode_posts(session)
+            groups = group_posts_by_series(posts)
+            if not groups:
+                raise RuntimeError("No numbered episode series could be derived from TopDJMixes.")
+            show_rows, selected, run_added_items = [], [], []
+            source_failures = 0
+            for index, (show_key, show_posts) in enumerate(sorted(groups.items()), 1):
+                stats = {"show_slug": show_key, "show_title": show_key.replace("-", " ").title(),
+                    "source_episode_candidates": len(show_posts), "episode_pages_selected": 0,
+                    "added_this_run": 0, "already_in_feed": 0, "queued_failures": 0,
+                    "latest_selected_title": "", "latest_selected_date": "", "selected_titles": ""}
+                selected_for_show, unresolved, examined = [], 0, 0
+                for post in show_posts:
+                    if len(selected_for_show) + unresolved >= EPISODES_PER_SHOW:
+                        break
+                    examined += 1
+                    item, error, candidate_is_episode = inspect_episode_post(session, post, show_key)
+                    if item:
+                        selected_for_show.append(item)
+                    elif error == "not_an_episode_page":
+                        pass
+                    elif candidate_is_episode:
+                        title = rest_title(post) or post.get("slug", "")
+                        add_retry(queue, post["link"], show_key, stats["show_title"], title,
+                                  rest_date(post), error or "episode_page_unavailable", now)
+                        unresolved += 1
+                        stats["queued_failures"] += 1
+                        source_failures += 1
+                    if len(selected_for_show) + unresolved < EPISODES_PER_SHOW and REQUEST_DELAY:
+                        time.sleep(REQUEST_DELAY)
+                    if examined >= min(len(show_posts), EPISODES_PER_SHOW + 12) and not selected_for_show:
+                        break
+                selected_for_show.sort(key=lambda item: item["date"], reverse=True)
+                selected_for_show = selected_for_show[:EPISODES_PER_SHOW]
+                stats["episode_pages_selected"] = len(selected_for_show) + unresolved
+                stats["selected_titles"] = "; ".join(item["title"] for item in selected_for_show)
+                if selected_for_show:
+                    stats["latest_selected_title"] = selected_for_show[0]["title"]
+                    stats["latest_selected_date"] = utc_iso(selected_for_show[0]["date"])
+                for item in selected_for_show:
+                    item["series_key"] = show_key
+                    item["series_title"] = item.get("series_title") or stats["show_title"]
+                    selected.append(item)
+                    guid = canonical_url(item.get("guid") or item["page"])
+                    if not REBUILD_ALL and guid in existing_by_guid:
+                        stats["already_in_feed"] += 1
+                        continue
+                    if guid in queue:
+                        continue
+                    audio, length = click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError)
+                    if audio:
+                        item["audio"], item["audio_length"] = audio, length or 0
+                        existing_by_guid[guid] = item
+                        existing_items.append(item)
+                        run_added_items.append(item)
+                        stats["added_this_run"] += 1
+                        log("episode_added_to_archive", show=show_key, title=item["title"],
+                            date=item["date"].isoformat(), page=safe_url(item["page"]),
+                            audio_host=urlparse(audio).netloc, cover_found=bool(item.get("cover")))
+                    else:
+                        add_retry(queue, item["page"], show_key, item["series_title"], item["title"],
+                                  item["date"], "download_click_or_audio_validation_failed", now)
+                        stats["queued_failures"] += 1
+                        source_failures += 1
+                    if REQUEST_DELAY:
+                        time.sleep(REQUEST_DELAY)
+                show_rows.append(stats)
+                if index == 1 or index % 10 == 0 or index == len(groups):
+                    log("mixshow_archive_progress", checked=index, total_groups=len(groups),
+                        candidate_posts=len(posts), selected_episode_pages=len(selected),
+                        rss_items=len(existing_items), retry_queue=len(queue))
+
+            retry_attempted, recovered_count = 0, 0
+            retries = [row for url, row in queue_at_start.items()
+                       if url in queue and retry_is_due(queue[url], now)]
+            for row in sorted(retries, key=lambda item: item.get("next_retry_utc", "")):
+                url = canonical_url(row["episode_url"])
+                current = queue.get(url)
+                if current is None or current.get("status") != "waiting":
+                    continue
+                retry_attempted += 1
+                episode_post = {"link": url, "slug": urlparse(url).path.strip("/").split("/")[-1],
+                    "date": current.get("source_date", ""), "date_gmt": current.get("source_date", ""),
+                    "title": {"rendered": current.get("episode_title", "")}}
+                item, error, candidate_is_episode = inspect_episode_post(session, episode_post, current.get("show_slug", ""))
+                if not item:
+                    if error == "not_an_episode_page":
+                        queue.pop(url, None)
+                        log("retry_queue_removed_not_episode", page=safe_url(url))
+                    else:
+                        update_retry_failure(current, error or "episode_page_unavailable", now)
+                    continue
+                audio, length = click_download_and_resolve_audio(page, context, session, item, PlaywrightTimeoutError)
+                if not audio:
+                    update_retry_failure(current, "download_click_or_audio_validation_failed", now)
+                else:
+                    item["audio"], item["audio_length"] = audio, length or 0
+                    guid = canonical_url(item.get("guid") or item["page"])
+                    was_in_feed = guid in existing_by_guid
+                    if was_in_feed:
+                        existing_by_guid[guid].update(item)
+                    else:
+                        existing_by_guid[guid] = item
+                        existing_items.append(item)
+                        run_added_items.append(item)
+                    queue.pop(url, None)
+                    recovered_count += 1
+                    log("retry_queue_recovered", page=safe_url(url), title=item["title"], added_to_rss=not was_in_feed)
+                if REQUEST_DELAY:
+                    time.sleep(REQUEST_DELAY)
+
+            write_inventory(show_rows, now)
+            unique = {}
+            for item in existing_items:
+                guid = canonical_url(item.get("guid") or item.get("page", ""))
+                if guid not in unique or item.get("date", datetime.min.replace(tzinfo=timezone.utc)) > unique[guid].get("date", datetime.min.replace(tzinfo=timezone.utc)):
+                    item["guid"] = guid
+                    item["page"] = canonical_url(item.get("page") or guid)
+                    unique[guid] = item
+            final_items = list(unique.values())
+            if not final_items:
+                raise RuntimeError("No validated episodes are available; production RSS was not written.")
+            write_rss(final_items)
+            validate_feed(final_items)
+            write_retry_queue(queue)
+            append_update_report(now, REBUILD_ALL, len(posts), len(show_rows), len(selected),
+                                 run_added_items, retry_attempted, recovered_count, queue, source_failures)
+            log("archive_update_complete", run_type="full_rebuild" if REBUILD_ALL else "incremental",
+                source_posts_scanned=len(posts), mixshows_discovered=len(show_rows),
+                episode_pages_selected=len(selected), rss_items=len(final_items), added_count=len(run_added_items),
+                retry_attempted=retry_attempted, recovered_count=recovered_count,
+                retry_waiting=sum(1 for row in queue.values() if row.get("status") == "waiting"),
+                retry_expired=sum(1 for row in queue.values() if row.get("status") == "expired"),
+                source_failures=source_failures, rss_file=str(OUT))
+        finally:
+            browser.close()
 
 if __name__ == "__main__":
     try:
