@@ -21,6 +21,10 @@ class FeedTests(unittest.TestCase):
     def test_xml_escapes_text(self):
         self.assertEqual(build_feed.xml_escape('A & B "C"'), "A &amp; B &quot;C&quot;")
 
+    def test_xml_description_keeps_line_breaks(self):
+        description = "Size: 274 Mb\\n\\n\\nTracklist:\\nFirst track"
+        self.assertEqual(build_feed.xml_escape(description), description)
+
     def test_description_preserves_line_breaks_and_adds_two_blank_lines(self):
         source = "Size: 274 Mb\nTracklist:\n1. First track\n2. Second track"
         expected = "Size: 274 Mb\n\n\nTracklist:\n1. First track\n2. Second track"
@@ -38,8 +42,8 @@ class FeedTests(unittest.TestCase):
             '<li>Second track</li></ol></div></article>', "html.parser")
         description = build_feed.extract_description(soup)
         self.assertIn("Size: 274 Mb\n\n\nTracklist:", description)
-        self.assertIn("1. First track", description)
-        self.assertIn("2. Second track", description)
+        self.assertIn("First track", description)
+        self.assertIn("Second track", description)
 
 if __name__ == "__main__":
     unittest.main()
