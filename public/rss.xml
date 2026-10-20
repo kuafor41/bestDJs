@@ -8,8 +8,10 @@
 <itunes:author>bestDJs</itunes:author>
 <itunes:category text="Music"/>
 <itunes:explicit>no</itunes:explicit>
-<lastBuildDate>Tue, 20 Oct 2026 16:09:25 GMT</lastBuildDate>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Capture-Radio.webp"/>
+<lastBuildDate>Tue, 20 Oct 2026 17:08:36 GMT</lastBuildDate>
+<itunes:author>bestDJs</itunes:author>
+<itunes:category text="Music"/>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <item>
 <title>Capture Radio 113</title>
 <link>https://www.topdjmixes.com/capture-radio-113/</link>
@@ -76,7 +78,7 @@ Size: 133 Mb
 Audio: 320 Kbps
 Size: 137 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Round-Triangle-Podcast.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/05/Round-Triangle-Podcast.jpg"/>
 <enclosure url="https://files.topdjmixes.com/RoundTrianglePodcast/Moonwatch3r%20-%20Round%20Triangle%20Podcast%20Episode%20108_eZx3sS3ZDXLFqem.mp3" length="143677550" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -223,6 +225,32 @@ Size: 274 mb
 27. Simon Patterson &amp; Zach Zlov – Consequence</description>
 <itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/VONYC-Sessions.webp"/>
 <enclosure url="https://files.topdjmixes.com/VonycSessions/Paul%20van%20Dyk%20-%20Vonyc%20Sessions%20Episode%201041_bmzL3RVcxDmDAqQ.mp3" length="288255096" type="audio/mpeg"/>
+<itunes:explicit>no</itunes:explicit>
+</item>
+<item>
+<title>On The Emotions Of Happiness 194</title>
+<link>https://www.topdjmixes.com/on-the-emotions-of-happiness-194/</link>
+<guid isPermaLink="true">https://www.topdjmixes.com/on-the-emotions-of-happiness-194/</guid>
+<pubDate>Mon, 19 Oct 2026 00:00:00 GMT</pubDate>
+<description>Date: 19-10-2026
+Audio: 320 Kbps
+Size: 141 mb
+— Sorry, there is no tracklist available! —</description>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/On-The-Emotions-Of-Happiness-2.jpg"/>
+<enclosure url="https://files.topdjmixes.com/OnTheEmotionsOfHappiness/DK%20&amp;%20Tarik%20-%20On%20The%20Emotions%20of%20Happiness%20Episode%20194_8vAzEFJNLm9wp7r.mp3" length="148124754" type="audio/mpeg"/>
+<itunes:explicit>no</itunes:explicit>
+</item>
+<item>
+<title>True To Trance (October 2026)</title>
+<link>https://www.topdjmixes.com/true-to-trance-october-2026/</link>
+<guid isPermaLink="true">https://www.topdjmixes.com/true-to-trance-october-2026/</guid>
+<pubDate>Mon, 19 Oct 2026 00:00:00 GMT</pubDate>
+<description>Date: 19-10-2026
+Audio: 320 Kbps
+Size: 137 mb
+— Sorry, there is no tracklist available! —</description>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/True-To-Trance.jpg"/>
+<enclosure url="https://files.topdjmixes.com/TrueToTrance/Ronski%20Speed%20-%20True%20To%20Trance%20(October%202026)_3bgp9AVaunDL7Jn.mp3" length="143937744" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
 <item>
@@ -540,7 +568,7 @@ Super8 &amp; Tab
 Audio: 320 Kbps
 Size: 130 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Octopus-Trance-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Octopus-Trance-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OctopusTranceRadio/Attika%20&amp;%20Yury%20-%20Octopus%20Trance%20Radio%20Episode%20158_mzLwHHQBXrPut4b.mp3" length="136901989" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -607,6 +635,7 @@ Size: 133 mb
 11. Tiefstone &amp; Camila (AR) – Desire
 12. Estiva – Désir (Estiva Club Mix)
 13. Groove Armada – Superstylin’</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SunSets/Chicane%20-%20SunSets%20Episode%20612_uHpyv9uQ4e92tSP.mp3" length="139668361" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -1526,7 +1555,7 @@ TiM TASTE
 12. TiM TASTE – Question Yourself
 13. TiM TASTE – Acid
 14. TiM TASTE – Library Of Dreams</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Pharmacy-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Pharmacy-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/PharmacyRadio/Christopher%20Lawrence%20-%20Pharmacy%20Radio%20Episode%20123_AYyEyQAjF9zZjS6.mp3" length="289083452" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -1661,7 +1690,7 @@ By The Light
 12. By The Light &amp; Alta+mira – ID
 13. Nora En Pure – Tibet
 14. Jaytech – La Presencia</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Jaytech-Music-Podcast.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/11/Jaytech-Music-Podcast.jpg"/>
 <enclosure url="https://files.topdjmixes.com/JaytechMusicPodcast/Jaytech%20Music%20Podcast%20Episode%20199_Qt6TT3ZJ8AFEXut.mp3" length="307941980" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -2204,6 +2233,7 @@ Size: 137 mb
 11. Pete Tong &amp; Kölsch – On The Nature Of Daylight
 12. Chicane – Nineteen Eighty Five
 13. Felix – Don’t You Want Me (Hooj Mix)</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SunSets/Chicane%20-%20SunSets%20Episode%20611_BdGm6JLNt3CHcem.mp3" length="144251283" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -2857,7 +2887,7 @@ Size: 137 mb
 13. AeFe – Expansion
 14. Balazs_ – Pattern Wave
 15. Chris Liebing – Eye C (Josh Wink Remix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/KD-Music-Radio-Show.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/03/KD-Music-Radio-Show.jpg"/>
 <enclosure url="https://files.topdjmixes.com/KDMusicRadioShow/Kaiserdisco%20-%20KD%20Music%20Radio%20Show%20Episode%20161_KnHTYJHYvLHr5nM.mp3" length="144327534" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3085,7 +3115,7 @@ Size: 143 Mb
 Audio: 320 Kbps
 Size: 137 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/On-The-Emotions-Of-Happiness.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/On-The-Emotions-Of-Happiness-2.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OnTheEmotionsOfHappiness/DK%20&amp;%20Tarik%20-%20On%20The%20Emotions%20of%20Happiness%20Episode%20193_QgAaZqz2sVRT76U.mp3" length="144341179" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3126,7 +3156,7 @@ Size: 133 Mb
 Audio: 320 Kbps
 Size: 141 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Sound-Space.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Sound-Space.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SoundSpace/Serge%20Landar%20-%20Sound%20Space%20Episode%20117_w5pAQZjRfpNmWsc.mp3" length="148803004" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3315,7 +3345,7 @@ Size: 274 mb
 24. Bart Claessen – Playmo (Sneijder Remix)
 25. Olmec Heads – Magic Man (MXGN Remix)
 26. Steve Dekay – Purity (Wavetraxx Remix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Melodik-Revolution.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Melodik-Revolution.jpg"/>
 <enclosure url="https://files.topdjmixes.com/MelodikRevolution/Mark%20Pledger%20-%20Melodik%20Revolution%20165_Yz5vUYz9F35Rhxe.mp3" length="288215828" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3438,7 +3468,7 @@ Size: 412 mb
 Audio: 320 Kbps
 Size: 139 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Blissful-Ambient-Sessions.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/09/Blissful-Ambient-Sessions.jpg"/>
 <enclosure url="https://files.topdjmixes.com/BlissfulAmbientSessions/Niclas%20Lundqvist%20-%20Blissful%20Ambient%20Sessions%20Episode%20033_jJJX9U2M7NVtqVw.mp3" length="145981294" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3711,7 +3741,7 @@ Size: 145 mb
 08. Sonic Arps – The Sun
 09. Nahalun &amp; Sonic Arps – Quantum Messengers
 10. Sonic Arps – Above Clouds</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Octopus-Trance-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Octopus-Trance-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OctopusTranceRadio/Attika%20&amp;%20Yury%20-%20Octopus%20Trance%20Radio%20Episode%20157_vRgNRLDthyJKKU3.mp3" length="152191980" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -3830,6 +3860,7 @@ Size: 139 mb
 12. Chicane – Red Skies (Evolution Mix)
 13. Matt Fax &amp; Boxer – Higher (Dosem Remix)
 14. Chicane – The Drive Home (Evolution Mix)</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SunSets/Chicane%20-%20SunSets%20Episode%20610_y9BfXGQDbuQzR7f.mp3" length="145981634" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -5295,6 +5326,7 @@ Size: 135 mb
 10. EGGSTA &amp; That Girl – Traces Of You
 11. Hello Machines – Air
 12. Eric Prydz – Liberate</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SunSets/Chicane%20-%20SunSets%20Episode%20609_NX466D3tNnKhK6e.mp3" length="141761292" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -5952,7 +5984,7 @@ Size: 274 Mb
 Audio: 320 Kbps
 Size: 147 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Melodic-Sessions.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/10/Melodic-Sessions.jpg"/>
 <enclosure url="https://files.topdjmixes.com/MelodicSessions/Leonety%20-%20Melodic%20Sessions%20Episode%20090_C4KPwXVYSVvWzpK.mp3" length="154327997" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -6331,7 +6363,7 @@ Size: 145 Mb
 Audio: 320 Kbps
 Size: 137 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/On-The-Emotions-Of-Happiness.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/On-The-Emotions-Of-Happiness-2.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OnTheEmotionsOfHappiness/DK%20&amp;%20Tarik%20-%20On%20The%20Emotions%20of%20Happiness%20Episode%20192_dnjMk9BSzd5wASp.mp3" length="143810371" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -6476,7 +6508,7 @@ Tim Green
 Audio: 320 Kbps
 Size: 137 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/True-To-Trance.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/True-To-Trance.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TrueToTrance/Ronski%20Speed%20-%20True%20To%20Trance%20(September%202026)_4rsm7YkjtwxX6hE.mp3" length="144458091" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -6555,7 +6587,7 @@ Size: 275 mb
 24. Brandon Beatty – Submit
 25. Bryn Whiting, Allen Watts – Vamos
 26. Giuseppe Ottaviani, Ilan Bluestone – Together Again</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Intelligent-Waveforms.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Intelligent-Waveforms.jpg"/>
 <enclosure url="https://files.topdjmixes.com/IntelligentWaveforms/Meza%20-%20Intelligent%20Waveforms%20Episode%20114_nD8F5bj3PTy74dt.mp3" length="288793122" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -6983,6 +7015,7 @@ Size: 137 mb
 12. Metakomplex &amp; Orkidea – Dream Of You
 13. Ryan Davis – I Found You
 14. Chicane – Offshore ’97 (A Man Called Adam Remix)</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SunSets/Chicane%20-%20SunSets%20Episode%20608_AerHz3rPkEsTeD4.mp3" length="144103953" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -7770,7 +7803,7 @@ Size: 140 mb
 10. Pablo Bozzi – Just Passing
 11. Running Hot – Trip
 12. Vhyce – Romantic Visions</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Odd-One-Out-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/08/Odd-One-Out-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OddOneOutRadio/Yotto%20-%20Odd%20One%20Out%20Radio%20Episode%20104_kbfzqNVb5TYLrJL.mp3" length="147595301" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8342,7 +8375,7 @@ Fallen Angel
 13. Shadowmaw &amp; Mindslash – What We Say
 14. The YellowHeads – Planet XX
 15. Arhetip – Spiral Of Change</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Pharmacy-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Pharmacy-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/PharmacyRadio/Christopher%20Lawrence%20-%20Pharmacy%20Radio%20Episode%20122_TrLafPdaL2Weytc.mp3" length="289086587" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8387,7 +8420,7 @@ Size: 137 mb
 Audio: 320 Kbps
 Size: 138 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/On-The-Emotions-Of-Happiness.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/On-The-Emotions-Of-Happiness-2.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OnTheEmotionsOfHappiness/DK%20&amp;%20Tarik%20-%20On%20The%20Emotions%20of%20Happiness%20Episode%20191_pNB8SzjAFSUjKrk.mp3" length="145379807" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8400,7 +8433,7 @@ Size: 138 mb
 Audio: 320 Kbps
 Size: 132 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Sound-Space.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Sound-Space.jpg"/>
 <enclosure url="https://files.topdjmixes.com/SoundSpace/Serge%20Landar%20-%20Sound%20Space%20Episode%20116_hDAMDMwPYmzNewK.mp3" length="139446988" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8441,7 +8474,7 @@ Size: 274 mb
 25. Oxia – Domino (Space 92 Remix)
 26. Ahmed Helmy Doppenberg &amp; HEL-BRG – Open Your Eyes
 27. Steve Dekay – Purity (Wavetraxx Remix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Melodik-Revolution.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Melodik-Revolution.jpg"/>
 <enclosure url="https://files.topdjmixes.com/MelodikRevolution/Mark%20Pledger%20-%20Melodik%20Revolution%20164_UZwCjAZmSCmXcAh.mp3" length="288265983" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8454,7 +8487,7 @@ Size: 274 mb
 Audio: 320 Kbps
 Size: 139 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Blissful-Ambient-Sessions.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/09/Blissful-Ambient-Sessions.jpg"/>
 <enclosure url="https://files.topdjmixes.com/BlissfulAmbientSessions/Niclas%20Lundqvist%20-%20Blissful%20Ambient%20Sessions%20Episode%20032_5cUmYLYKJXFcxsw.mp3" length="145926959" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8507,7 +8540,7 @@ Size: 142 mb
 08. Coral – In Motion
 09. Enith – Butterfly
 10. Man With No Name – Vavoom (Oforia &amp; DJ Dot Remix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Octopus-Trance-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Octopus-Trance-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OctopusTranceRadio/Attika%20&amp;%20Yury%20-%20Octopus%20Trance%20Radio%20Episode%20156_SBBDzTLmxc6QLzw.mp3" length="149484650" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8594,7 +8627,7 @@ Size: 137 mb
 14. Toni Alvarez – Nueva York
 15. Kaiserdisco – Sirens
 16. Stoked – Splintercell</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/KD-Music-Radio-Show.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/03/KD-Music-Radio-Show.jpg"/>
 <enclosure url="https://files.topdjmixes.com/KDMusicRadioShow/Kaiserdisco%20-%20KD%20Music%20Radio%20Show%20Episode%20160_YKZQyTdGvDBJvNF.mp3" length="144336938" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8698,7 +8731,7 @@ ASTRON4UT
 13. Armin van Buuren &amp; Argy ft. Marlo Rex – Like A Child
 14. deadmau5 ft. Stevie Appleton – Science (ASTRON4UT Remix)
 15. ASTRON4UT – ID</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Jaytech-Music-Podcast.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/11/Jaytech-Music-Podcast.jpg"/>
 <enclosure url="https://files.topdjmixes.com/JaytechMusicPodcast/Jaytech%20Music%20Podcast%20Episode%20198_7GVbnszHYFcXR9n.mp3" length="288589919" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8725,7 +8758,7 @@ Size: 142 Mb
 11. Fernanda Pistelli &amp; Absolute Hypnotic – 1000 Versions
 12. Xerox &amp; Illumination – Fly (Guy Salama &amp; Rafael Osmo Rework)
 13. Richard Durand &amp; RinatNevo – Goodbye My Love</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Unrated.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/01/Unrated.jpg"/>
 <enclosure url="https://files.topdjmixes.com/Unrated/Rafael%20Osmo%20-%20Unrated%20016_52uATekIuDb11Hc.mp3" length="149390368" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8767,7 +8800,7 @@ Size: 140 mb
 Audio: 320 Kbps
 Size: 129 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Melodic-Sessions.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/10/Melodic-Sessions.jpg"/>
 <enclosure url="https://files.topdjmixes.com/MelodicSessions/Leonety%20-%20Melodic%20Sessions%20Episode%20089_aCY0GPjJ6wbKvne.mp3" length="135531327" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8854,7 +8887,7 @@ Size: 276 mb
 Audio: 320 Kbps
 Size: 147 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/The-Psychedelic-Wheel.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/The-Psychedelic-Wheel.jpg"/>
 <enclosure url="https://files.topdjmixes.com/ThePsychedelicWheel/Mystika%20-%20The%20Psychedelic%20Wheel%20Episode%20031_WgqueJUsW3Snlkx.mp3" length="154443564" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -8912,7 +8945,7 @@ Size: 137 mb
 11. Jack Willard – Waiting
 12. ANUQRAM &amp; Anton MAKe – La Saga (Cosmonaut Remix)
 13. Sultan + Shepard &amp; Prinze George – Centuries</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Round-Triangle-Podcast.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/05/Round-Triangle-Podcast.jpg"/>
 <enclosure url="https://files.topdjmixes.com/RoundTrianglePodcast/Moonwatch3r%20-%20Round%20Triangle%20Podcast%20Episode%20107_brkum8G2j9ZvA4p.mp3" length="143971166" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9014,7 +9047,7 @@ Size: 136 mb
 10. Anabel Englund &amp; DEPARTAMENTO – Midnight Calling
 11. ALOTT &amp; Apophis &amp; Crish – Fever Dreaming
 12. YOTTO ft. Dakota – Deep Dive [The Finnish Line]</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Odd-One-Out-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/08/Odd-One-Out-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OddOneOutRadio/Yotto%20-%20Odd%20One%20Out%20Radio%20Episode%20103_R4SQey38SyHVTSK.mp3" length="142692640" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9080,7 +9113,7 @@ Size: 276 mb
 Audio: 320 Kbps
 Size: 139 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/On-The-Emotions-Of-Happiness.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/On-The-Emotions-Of-Happiness-2.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OnTheEmotionsOfHappiness/DK%20&amp;%20Tarik%20-%20On%20The%20Emotions%20of%20Happiness%20Episode%20190_2MkijX7SJ1SVIne.mp3" length="145859416" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9093,7 +9126,7 @@ Size: 139 mb
 Audio: 320 Kbps
 Size: 138 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/True-To-Trance.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/True-To-Trance.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TrueToTrance/Ronski%20Speed%20-%20True%20To%20Trance%20(August%202026)_2zZRrtHjrhugh29.mp3" length="145440647" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9133,7 +9166,7 @@ Size: 275 mb
 24. Frankyeffe – Rise Again
 25. Davey Asprey, Caitlin Potter – Something
 26. Giuseppe Ottaviani, Diana Goldberg – Hold On</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Intelligent-Waveforms.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Intelligent-Waveforms.jpg"/>
 <enclosure url="https://files.topdjmixes.com/IntelligentWaveforms/Meza%20-%20Intelligent%20Waveforms%20Episode%20113_o0hACr9WTDFj5sI.mp3" length="287966608" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9161,7 +9194,7 @@ Size: 158 Mb
 12. ReOrder &amp; Kalinda – Edge of My Mind
 13. Ciaran McAuley, Sue McLaren &amp; Nicholas Gunn – Caledonia
 14. James Cottle – Wrong Tram in Rotterdam</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Unrated.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/01/Unrated.jpg"/>
 <enclosure url="https://files.topdjmixes.com/Unrated/Rafael%20Osmo%20-%20Unrated%20015_fi9f65FN4GdQrMX.mp3" length="166686688" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9211,7 +9244,7 @@ D-Nox
 09. D-Nox &amp; André Moret – Relief Rain
 10. Kamilo Sanclemente – NO NO NO
 11. Miro – Paradise (Quivver Remix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/JOOF-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/JOOF-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/JOOFRadio/John%2000%20Fleming%20-%20JOOF%20Radio%20Episode%20083_jHz4jebZrejw9T3.mp3" length="288484004" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9245,7 +9278,7 @@ Hobin Rude
 07. Hobin Rude – Then And Now
 08. ID – ID
 09. ID – ID</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/JOOF-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/JOOF-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/JOOFRadio/John%2000%20Fleming%20-%20JOOF%20Radio%20Episode%20082_XTttUQULubzt9fT.mp3" length="288278159" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9285,7 +9318,7 @@ Rick Pier O’Neil
 12. Rick Pier O’Neil – Duality (RPO Part 1)
 13. ID – ID
 14. Rick Pier O’Neil &amp; David Weed ft. Miniko – I Need You</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/JOOF-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/JOOF-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/JOOFRadio/John%2000%20Fleming%20-%20JOOF%20Radio%20Episode%20081_XekajC1CvJI6WoB.mp3" length="288548787" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9315,7 +9348,7 @@ Size: 275 Mb
 14. ATMOS – Everglade
 Yestermorrow
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Pharmacy-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Pharmacy-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/PharmacyRadio/Christopher%20Lawrence%20-%20Pharmacy%20Radio%20Episode%20121_CL5897IzqtbTTUl.mp3" length="289080317" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9387,7 +9420,7 @@ Size: 138 mb
 Audio: 320 Kbps
 Size: 139 mb
 — Sorry, there is no tracklist available! —</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Blissful-Ambient-Sessions.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/09/Blissful-Ambient-Sessions.jpg"/>
 <enclosure url="https://files.topdjmixes.com/BlissfulAmbientSessions/Niclas%20Lundqvist%20-%20Blissful%20Ambient%20Sessions%20Episode%20031_92J6Dm0RfHGvcri.mp3" length="146021000" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9477,7 +9510,7 @@ Size: 137 mb
 12. AeFe – Domination
 13. Robag Wruhme – FUMAXOHN
 14. Chicago Loop &amp; Filipe Barbosa – Shine</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/KD-Music-Radio-Show.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/03/KD-Music-Radio-Show.jpg"/>
 <enclosure url="https://files.topdjmixes.com/KDMusicRadioShow/Kaiserdisco%20-%20KD%20Music%20Radio%20Show%20Episode%20159_zc0VQXCMucUj6Dh.mp3" length="144312906" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9701,7 +9734,7 @@ Size: 142 mb
 11. Sambo – How Do You Feel
 12. Close Proximity – Shadows
 13. BT &amp; Jan Johnston – Mercury &amp; Solace (Sasha Remix) [The Finnish Line]</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Odd-One-Out-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/08/Odd-One-Out-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OddOneOutRadio/Yotto%20-%20Odd%20One%20Out%20Radio%20Episode%20102_190Md0zWVdbDA7U.mp3" length="149464624" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9727,7 +9760,7 @@ Size: 136 mb
 10. Makebo – Balance
 11. Aler – Rising Kelly
 12. Sander Costanzi – Inside</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Round-Triangle-Podcast.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/05/Round-Triangle-Podcast.jpg"/>
 <enclosure url="https://files.topdjmixes.com/RoundTrianglePodcast/Moonwatch3r%20-%20Round%20Triangle%20Podcast%20Episode%20106_U5SjH7838EQ5dty.mp3" length="142625337" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -9941,7 +9974,7 @@ Size: 138 mb
 08. Shivatree &amp; Aktyum – Becoming Gravity
 09. Morsei – Memories
 10. Mercuroid &amp; Misaya – Now &amp; Forever</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Octopus-Trance-Radio.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2024/08/Octopus-Trance-Radio.jpg"/>
 <enclosure url="https://files.topdjmixes.com/OctopusTranceRadio/Attika%20&amp;%20Yury%20-%20Octopus%20Trance%20Radio%20Episode%20154_kyiCyBhEjBvCn7u.mp3" length="145131605" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -10016,7 +10049,7 @@ Size: 137 mb
 13. Balazs_ – Teenage Crime
 14. Slam – DRUMTRAX Vol. 3
 15. Kaiserdisco – Callista (Extended Mix)</description>
-<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/KD-Music-Radio-Show.webp"/>
+<itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2025/03/KD-Music-Radio-Show.jpg"/>
 <enclosure url="https://files.topdjmixes.com/KDMusicRadioShow/Kaiserdisco%20-%20KD%20Music%20Radio%20Show%20Episode%20158_q42xo7lVZlilbyd.mp3" length="144312906" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -18960,6 +18993,7 @@ Manuel Le Saux
 03. ID – ID
 04. Pinkque – Reborn
 05. UCast – Tanity</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TytaniumSessions/Sean%20Tyas%20-%20Tytanium%20Sessions%20219_O7Wq1SzVeLnLgtQ.mp3" length="115981639" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -19059,6 +19093,7 @@ Dan Stone
 03. Chris SX – Sands Beach
 04. Max Graham &amp; Maarten De Jong – Lekker (ReOrder Remix)
 05. Dan Stone – Lucca</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TytaniumSessions/Sean%20Tyas%20-%20Tytanium%20Sessions%20218_1D9JsGYKbPePA3r.mp3" length="116399598" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -19099,6 +19134,7 @@ Adam Ellis
 03. Liam Wilson – Kiss (Adam Ellis Remix)
 04. Madonna – What It Feels Like For A Girl (Above &amp; Beyond Club Mix)
 05. Adam Ellis – Agent Orange</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TytaniumSessions/Sean%20Tyas%20-%20Tytanium%20Sessions%20217_GrQeiAzJW1brCk7.mp3" length="116875236" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -19140,6 +19176,7 @@ Allen &amp; Envy
 05. ID – ID
 06. Cold Rush- Temptation
 07. Binary Finary &amp; Frank Dueffel – Trancelation (Photographer Remix)</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TytaniumSessions/Sean%20Tyas%20-%20Tytanium%20Sessions%20216_UZtlzF3oY1Jyexh.mp3" length="173579513" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
@@ -19182,6 +19219,7 @@ Temple One
 03. The Thrillseekers &amp; Sam Mitcham – All The Little Things
 04. Alex M.O.R.P.H. ft. Natalie Gioia – My Heaven
 05. Suncatcher – Fruitify (Club Mix)</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <enclosure url="https://files.topdjmixes.com/TytaniumSessions/Sean%20Tyas%20-%20Tytanium%20Sessions%20215_QJe4Q5MJN65j9Wj.mp3" length="116431363" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
