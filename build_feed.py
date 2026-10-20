@@ -1604,7 +1604,7 @@ def write_inventory(show_rows, now, all_items=None):
                     entries = []
                     raw_list = old.get("episodes_for_radioshow", "")
                     for line in raw_list.splitlines():
-                        match = re.match(r"^\\s*-\\s*\\[(.*?)\\]\\((https?://[^)]+)\\)\\s*$", line)
+                        match = re.match(r"^\s*-\s*\[(.*?)\]\((https?://[^)]+)\)\s*$", line)
                         if match:
                             title, url = match.group(1).strip(), match.group(2).strip()
                             entries.append({"title": title, "url": url})
@@ -1670,7 +1670,7 @@ def write_inventory(show_rows, now, all_items=None):
             entries.sort(key=lambda entry: (
                 item_by_url.get(entry["url"], {}).get("date", datetime.min.replace(tzinfo=timezone.utc)),
                 entry["title"]), reverse=True)
-            formatted = "\\n".join(
+            formatted = "\n".join(
                 f"- [{entry['title'].replace(']', '')}]({entry['url']})"
                 for entry in entries if entry.get("title") and entry.get("url")
             )
