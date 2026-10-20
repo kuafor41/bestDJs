@@ -149,6 +149,20 @@ def extract_description(soup: BeautifulSoup, title: str):
         chunks.append(text)
 
     description = "\n".join(chunks).strip()
+
+    # In the isolated 50-episode test feed, leave exactly two blank lines
+    # between the Size line and the tracklist (or its explicit heading).
+    # Do not alter descriptions that have no tracklist.
+    size_line = re.search(r"(?im)^Size\s*:[^\n]*", description)
+    if size_line:
+        tail = description[size_line.end():]
+        if re.search(r"(?im)^\s*(?:Tracklist\s*:|\d{1,3}[.)]\s+)", tail):
+            description = (
+                description[:size_line.end()].rstrip()
+                + "\n\n\n"
+                + tail.lstrip("\r\n")
+            )
+
     return description[:10000] if description else title
 
 
