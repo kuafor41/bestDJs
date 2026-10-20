@@ -2,6 +2,11 @@ name: Update bestDJs RSS
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "build_feed.py"
+      - "tests/test_feed.py"
   schedule:
     - cron: "17 */12 * * *"
 
