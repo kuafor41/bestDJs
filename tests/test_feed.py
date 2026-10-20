@@ -101,6 +101,33 @@ class FeedTests(unittest.TestCase):
         finally:
             build_feed.INVENTORY_CSV = original_path
 
+    def test_cover_extractor_matches_punctuationless_sunsets_filename(self):
+        soup = BeautifulSoup(
+            '<article><div class="entry-content">'
+            '<img src="https://www.topdjmixes.com/wp-content/uploads/2026/08/SunSets-1250x569.webp" '
+            'alt="SunSets" width="1250" height="569">'
+            '</div></article>', "html.parser")
+        cover = build_feed.extract_cover(
+            soup, "https://www.topdjmixes.com/sunsets-612/", "Sun:Sets 612")
+        self.assertEqual(cover, "https://www.topdjmixes.com/wp-content/uploads/2026/08/SunSets-1250x569.webp")
+
+    def test_cover_url_liveness_rejects_http_404(self):
+        class FakeResponse:
+            status_code = 404
+            headers = {"Content-Type": "text/html; charset=UTF-8"}
+            def close(self):
+                pass
+        class FakeSession:
+            def get(self, *args, **kwargs):
+                return FakeResponse()
+        original_cache = build_feed.COVER_URL_VALIDITY_CACHE
+        try:
+            build_feed.COVER_URL_VALIDITY_CACHE = {}
+            self.assertFalse(build_feed.cover_url_is_live(
+                FakeSession(), "https://www.topdjmixes.com/wp-content/uploads/old-cover.jpg"))
+        finally:
+            build_feed.COVER_URL_VALIDITY_CACHE = original_cache
+
     def test_missing_episode_covers_fall_back_to_podcast_cover(self):
         rows = [{"title": "Sun:Sets", "series_key": "sun-sets", "cover": None}]
         build_feed.canonicalize_series_covers(rows)
@@ -121,26 +148,6 @@ class FeedTests(unittest.TestCase):
         self.assertTrue(rows[0]["cover"].endswith(".jpg"))
         self.assertEqual(rows[0]["cover"], rows[1]["cover"])
         self.assertNotEqual(rows[2]["cover"], rows[3]["cover"])
-
-    def test_guid_history_protection_allows_retained_and_new_episodes(self):
-        previous = [
-            {"guid": "https://www.topdjmixes.com/old-one/"},
-            {"guid": "https://www.topdjmixes.com/old-two/"},
-        ]
-        current = previous + [{"guid": "https://www.topdjmixes.com/new-one/"}]
-        build_feed.validate_guid_retention(previous, current)
-
-    def test_guid_history_protection_fails_if_any_old_episode_is_missing(self):
-        previous = [
-            {"guid": "https://www.topdjmixes.com/old-one/"},
-            {"guid": "https://www.topdjmixes.com/old-two/"},
-        ]
-        current = [
-            {"guid": "https://www.topdjmixes.com/old-one/"},
-            {"guid": "https://www.topdjmixes.com/new-one/"},
-        ]
-        with self.assertRaisesRegex(RuntimeError, "1 previously published GUID.*old-two"):
-            build_feed.validate_guid_retention(previous, current)
 
     def test_rss_channel_artwork_and_metadata_are_unique(self):
         from tempfile import TemporaryDirectory

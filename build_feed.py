@@ -745,6 +745,7 @@ RETRY_INITIAL_HOURS = 6
 RETRY_MAX_HOURS = 72
 ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 PODCAST_COVER_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"
+COVER_URL_VALIDITY_CACHE = {}
 ET.register_namespace("itunes", ITUNES_NS)
 
 def canonical_url(url: str) -> str:
@@ -911,14 +912,53 @@ def extract_title(soup: BeautifulSoup, fallback: str):
         return clean_text(node["content"])
     return fallback
 
-def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
+def cover_url_is_live(session, url: str, referer: str = SHOWS_URL):
+    """Return true only when the URL currently serves an actual image, not a dead path or HTML error page."""
+    url = str(url or "").strip()
+    if not url:
+        return False
+    if canonical_url(url) == canonical_url(PODCAST_COVER_URL):
+        return True
+    key = canonical_url(url)
+    if key in COVER_URL_VALIDITY_CACHE:
+        return COVER_URL_VALIDITY_CACHE[key]
+    valid = False
+    response = None
+    try:
+        response = session.get(
+            url,
+            headers={**HEADERS, "Range": "bytes=0-0", "Referer": referer or SHOWS_URL},
+            timeout=15,
+            stream=True,
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", "") or "").lower().split(";", 1)[0].strip()
+        valid = status in (200, 206) and content_type.startswith("image/")
+        log("cover_url_probe", url=safe_url(url), status=status,
+            content_type=content_type, valid=valid)
+    except requests.RequestException as exc:
+        log("cover_url_probe_error", url=safe_url(url), error=type(exc).__name__)
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+    COVER_URL_VALIDITY_CACHE[key] = valid
+    return valid
+
+
+def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str, session=None):
     candidates_by_url = {}
     def normalize(value):
         value = re.sub(r"\.(?:jpe?g|png|webp)(?:$|\?).*$", "", value, flags=re.I)
         value = re.sub(r"\b(?:episode|ep|show|radio|podcast)\s*#?\d+\b", " ", value, flags=re.I)
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    def compact(value):
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
     show_name = re.sub(r"\s+(?:episode\s*)?#?\d+[a-z]?$", "", episode_title, flags=re.I).strip()
     show_tokens = set(normalize(show_name).split())
+    show_compact = compact(show_name)
     def add(raw, source, alt="", title="", width=0, height=0):
         raw = html.unescape(str(raw or "").strip())
         if not raw or raw.startswith("data:"):
@@ -936,6 +976,9 @@ def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
             score += 100 + 15 * overlap
             if show_tokens.issubset(label_tokens):
                 score += 100
+        # Some show names are stored without punctuation/case boundaries (Sun:Sets -> SunSets).
+        if show_compact and show_compact in compact(label):
+            score += 250
         if source == "content":
             score += 20
         if width >= 250 and height >= 250:
@@ -961,7 +1004,16 @@ def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
                 last = srcset.split(",")[-1].strip().split(" ")[0]
                 add(last, "content", node.get("alt", ""), node.get("title", ""), width, height)
     ranked = sorted(candidates_by_url.items(), key=lambda pair: pair[1], reverse=True)
-    return ranked[0][0] if ranked and ranked[0][1] >= 100 else None
+    for url, score in ranked:
+        if score < 100:
+            continue
+        if session is not None and not cover_url_is_live(session, url, page_url):
+            log("cover_candidate_rejected", page=safe_url(page_url), title=episode_title,
+                candidate=safe_url(url), score=score, reason="image_url_not_live")
+            continue
+        return url
+    return None
+
 
 def is_episode_page(soup: BeautifulSoup):
     control = soup.select_one("a.wpdm-download-link.download-on-click")
@@ -1284,7 +1336,7 @@ def inspect_episode_post(session, post, series_key):
     if not date:
         return None, "episode_date_missing", True
     description = extract_description(soup) or title
-    cover = extract_cover(soup, response.url, title)
+    cover = extract_cover(soup, response.url, title, session=session)
     player_audio_candidate = find_audio(soup, response.url)
     page_url = canonical_url(response.url)
     item = {
@@ -1706,6 +1758,54 @@ def apply_series_metadata(items, catalog_rows, posts):
 
 
 
+def refresh_existing_covers(items, session, catalog_rows, posts):
+    """Repair stale artwork URLs in already-published RSS items without touching their GUIDs or audio."""
+    if not items:
+        return 0
+    apply_series_metadata(items, catalog_rows, posts)
+    groups = defaultdict(list)
+    for item in items:
+        old_cover = str(item.get("cover") or "").strip()
+        show_key = str(item.get("series_key") or "").strip().lower()
+        needs_refresh = (not old_cover or old_cover == PODCAST_COVER_URL
+                         or not cover_url_is_live(session, old_cover, item.get("page") or SHOWS_URL))
+        if needs_refresh:
+            # A generic fallback can be shared by unrelated shows, so include show identity in its key.
+            groups[(old_cover, show_key or canonical_url(item.get("page") or ""))].append(item)
+
+    refreshed_groups = 0
+    for (old_cover, show_key), group_items in groups.items():
+        new_cover = None
+        # Try a few episode pages belonging to this same show/old-cover group.
+        for item in group_items[:3]:
+            page_url = item.get("page") or item.get("guid") or ""
+            if not page_url:
+                continue
+            try:
+                response = session.get(page_url, headers={**HEADERS, "Referer": SHOWS_URL}, timeout=30)
+                if response.status_code >= 400:
+                    log("cover_page_refresh_http_error", page=safe_url(page_url), status=response.status_code)
+                    continue
+                soup = BeautifulSoup(response.text, "html.parser")
+                found = extract_cover(soup, response.url, item.get("title", ""), session=session)
+                if found and found != old_cover:
+                    new_cover = found
+                    break
+            except requests.RequestException as exc:
+                log("cover_page_refresh_error", page=safe_url(page_url), error=type(exc).__name__)
+        if not new_cover:
+            # A known-dead or generic artwork URL is worse than a valid fallback image.
+            new_cover = PODCAST_COVER_URL
+        for item in group_items:
+            item["cover"] = new_cover
+        refreshed_groups += 1
+        log("existing_episode_cover_refreshed", show=show_key or "unknown",
+            affected_items=len(group_items), old_cover=safe_url(old_cover),
+            new_cover=safe_url(new_cover), used_podcast_fallback=(new_cover == PODCAST_COVER_URL))
+    log("existing_cover_refresh_complete", groups_checked=len(groups), groups_refreshed=refreshed_groups)
+    return refreshed_groups
+
+
 def canonicalize_series_covers(items):
     # Normalize only clearly equivalent cover variants: same basename, optional
     # WordPress duplicate suffix "-2", different file formats. Truly episode-specific
@@ -1956,6 +2056,7 @@ def main():
         try:
             login_in_browser(page, context, session, PlaywrightTimeoutError)
             posts, catalog_rows = discover_episode_posts(session)
+            refreshed_cover_groups = refresh_existing_covers(existing_items, session, catalog_rows, posts)
             catalog_by_slug = {row["show_slug"]: row for row in catalog_rows}
             groups = group_posts_by_series(posts)
             if not groups:
