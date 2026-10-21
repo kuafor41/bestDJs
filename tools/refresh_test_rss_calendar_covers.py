@@ -306,7 +306,7 @@ def discover_calendar_covers(session, items, page):
             page.wait_for_timeout(800)
             advanced = None
             for _ in range(3):
-                advanced = rss._schedule_calendar_snapshot(page)
+                advanced = schedule_snapshot(page)
                 new_month = current_month(advanced)
                 if (new_month and new_month != old_month) or advanced.get("url") != old_url:
                     break
