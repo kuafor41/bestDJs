@@ -283,5 +283,96 @@ class FeedTests(unittest.TestCase):
         self.assertIsNone(artwork)
         self.assertEqual(reason, "no_id3v2_header")
 
+
+    def test_reported_legacy_metadata_is_refreshed_from_episode_pages(self):
+        from unittest.mock import patch
+        from urllib.parse import urlparse
+
+        items = []
+        for slug, title in build_feed.REPORTED_METADATA_REPAIR_PAGES.items():
+            items.append({
+                "title": title,
+                "page": f"https://www.topdjmixes.com/{slug}/",
+                "guid": f"https://www.topdjmixes.com/{slug}/",
+                "description": title,
+                "cover": build_feed.PODCAST_COVER_URL,
+                "audio": "https://files.topdjmixes.com/test.mp3",
+            })
+
+        class FakeResponse:
+            status_code = 200
+            text = "<html><article><div class='entry-content'>episode</div></article></html>"
+
+            def __init__(self, url):
+                self.url = url
+
+            def close(self):
+                pass
+
+        class FakeSession:
+            def get(self, url, **kwargs):
+                return FakeResponse(url)
+
+        def fake_cover(_soup, page_url, _title, session=None):
+            slug = urlparse(page_url).path.strip("/").split("/")[-1]
+            return f"https://www.topdjmixes.com/wp-content/uploads/2026/08/{slug}.jpg"
+
+        source_description = "Date: 21-09-2026\nAudio: 320 Kbps\nSize: 137 mb"
+        with patch.object(build_feed, "extract_description", return_value=source_description), \
+             patch.object(build_feed, "extract_cover", side_effect=fake_cover):
+            stats = build_feed.refresh_reported_episode_metadata(items, FakeSession())
+
+        self.assertEqual(stats["targets_found"], 6)
+        self.assertEqual(stats["pages_refreshed"], 6)
+        self.assertEqual(stats["descriptions_updated"], 6)
+        self.assertEqual(stats["source_covers_updated"], 6)
+        self.assertEqual(stats["failures"], 0)
+        for item in items:
+            self.assertEqual(item["description"], source_description)
+            self.assertTrue(item["cover"].endswith(".jpg"))
+            self.assertTrue(item.get("_prefer_source_cover"))
+
+    def test_embedded_art_does_not_replace_preferred_source_cover(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from unittest.mock import patch
+        from datetime import datetime, timezone
+
+        source_cover = "https://www.topdjmixes.com/wp-content/uploads/2026/08/true-to-trance-1250x569.webp"
+        embedded_cover = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/episode-artwork/embedded.jpg"
+        item = {
+            "title": "True To Trance (September 2026)",
+            "page": "https://www.topdjmixes.com/true-to-trance-september-2026/",
+            "guid": "https://www.topdjmixes.com/true-to-trance-september-2026/",
+            "audio": "https://files.topdjmixes.com/test.mp3",
+            "cover": source_cover,
+            "_prefer_source_cover": True,
+        }
+        embedded_result = {
+            "url": embedded_cover, "sha256": "a" * 64,
+            "bytes": 100, "picture_type": 3,
+        }
+        old_index, old_dir = build_feed.ARTWORK_INDEX_CSV, build_feed.ARTWORK_DIR
+        try:
+            with TemporaryDirectory() as tmp:
+                build_feed.ARTWORK_INDEX_CSV = Path(tmp) / "artwork-index.csv"
+                build_feed.ARTWORK_DIR = Path(tmp) / "episode-artwork"
+                with patch.object(build_feed, "_extract_embedded_cover",
+                                  return_value=(embedded_result, "embedded_picture_found")):
+                    stats = build_feed.refresh_embedded_episode_artwork(
+                        [item], FakeSessionForArtwork(), datetime(2026, 10, 21, tzinfo=timezone.utc)
+                    )
+                self.assertEqual(item["cover"], source_cover)
+                self.assertEqual(stats["source_covers_preserved"], 1)
+                self.assertEqual(stats["embedded_found"], 1)
+        finally:
+            build_feed.ARTWORK_INDEX_CSV, build_feed.ARTWORK_DIR = old_index, old_dir
+
+
+class FakeSessionForArtwork:
+    def get(self, *args, **kwargs):
+        raise AssertionError("Mocked embedded-art extraction must not make HTTP requests.")
+
+
 if __name__ == "__main__":
     unittest.main()

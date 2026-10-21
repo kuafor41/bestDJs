@@ -745,6 +745,14 @@ RETRY_INITIAL_HOURS = 6
 RETRY_MAX_HOURS = 72
 ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 PODCAST_COVER_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"
+REPORTED_METADATA_REPAIR_PAGES = {
+    "trance-all-over-the-world-359": "Trance All Over The World 359",
+    "true-to-trance-september-2026": "True To Trance (September 2026)",
+    "altitude-radio-199": "Altitude Radio 199",
+    "multifarious-minimal-110": "Multifarious Minimal 110",
+    "moor-music-299": "Moor Music 299",
+    "degenerate-radio-181": "Degenerate Radio 181",
+}
 ARTWORK_DIR = Path("public/episode-artwork")
 ARTWORK_BASE_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/episode-artwork"
 ARTWORK_INDEX_CSV = Path("data/episode-artwork-index.csv")
@@ -1772,6 +1780,7 @@ def refresh_embedded_episode_artwork(items, session, now=None):
         "episodes": len(items), "probed": 0, "embedded_found": 0, "covers_replaced": 0,
         "cached_embedded": 0, "cached_no_artwork": 0, "recent_failures_skipped": 0,
         "no_artwork": 0, "probe_failures": 0, "unsupported_large_tags": 0,
+        "source_covers_preserved": 0,
     }
     retry_after = timedelta(hours=ARTWORK_FAILURE_RETRY_HOURS)
     for item in items:
@@ -1785,7 +1794,9 @@ def refresh_embedded_episode_artwork(items, session, now=None):
         old_cover_url = old_row.get("cover_url", "")
         checked_at = parse_datetime_value(old_row.get("last_checked_utc", ""))
         if same_audio and old_status == "embedded" and old_cover_url and _local_artwork_exists(old_cover_url):
-            if item.get("cover") != old_cover_url:
+            if item.get("_prefer_source_cover"):
+                stats["source_covers_preserved"] += 1
+            elif item.get("cover") != old_cover_url:
                 item["cover"] = old_cover_url
                 stats["covers_replaced"] += 1
             stats["cached_embedded"] += 1
@@ -1817,7 +1828,11 @@ def refresh_embedded_episode_artwork(items, session, now=None):
         }
         if result:
             row.update(status="embedded", cover_url=result["url"], image_sha256=result["sha256"])
-            if old_cover != result["url"]:
+            if item.get("_prefer_source_cover"):
+                # For the six reported pages, page artwork is authoritative;
+                # some embedded MP3 tags point at a different episode's artwork.
+                stats["source_covers_preserved"] += 1
+            elif old_cover != result["url"]:
                 item["cover"] = result["url"]
                 stats["covers_replaced"] += 1
             else:
@@ -2046,6 +2061,34 @@ def validate_feed(items):
         if not parsed:
             raise RuntimeError(f"RSS item has an invalid publication date: {title}")
         dates.append(parsed)
+    # Explicit regression guard for the six pages reported by the user.
+    entries_by_slug = {}
+    for entry in entries:
+        page_url = entry.findtext("link") or entry.findtext("guid") or ""
+        slug = urlparse(page_url).path.strip("/").split("/")[-1].lower()
+        if slug in REPORTED_METADATA_REPAIR_PAGES:
+            entries_by_slug[slug] = entry
+    source_items_by_slug = {}
+    for item in items:
+        page_url = item.get("page") or item.get("guid") or ""
+        slug = urlparse(page_url).path.strip("/").split("/")[-1].lower()
+        if slug in REPORTED_METADATA_REPAIR_PAGES:
+            source_items_by_slug[slug] = item
+    for slug, expected_title in REPORTED_METADATA_REPAIR_PAGES.items():
+        entry = entries_by_slug.get(slug)
+        if entry is None:
+            raise RuntimeError(f"Reported episode is missing from production RSS: {expected_title}")
+        description = entry.findtext("description") or ""
+        if not re.search(r"(?im)^Date\s*:", description) or not re.search(r"(?im)^Size\s*:", description):
+            raise RuntimeError(f"Reported episode description is incomplete: {expected_title}")
+        image_node = entry.find(f"{{{ITUNES_NS}}}image")
+        image_url = image_node.get("href", "") if image_node is not None else ""
+        if not image_url or image_url == PODCAST_COVER_URL:
+            raise RuntimeError(f"Reported episode does not have episode/show artwork: {expected_title}")
+        source_item = source_items_by_slug.get(slug)
+        if not source_item or not source_item.get("_prefer_source_cover"):
+            raise RuntimeError(f"Reported episode cover was not refreshed from its source page: {expected_title}")
+
     if dates != sorted(dates, reverse=True):
         raise RuntimeError("RSS items are not sorted newest to oldest.")
     log("rss_validation_passed", path=str(OUT), items=len(entries),
@@ -2168,6 +2211,67 @@ def refresh_existing_covers(items, session, catalog_rows, posts):
             new_cover=safe_url(new_cover), used_podcast_fallback=(new_cover == PODCAST_COVER_URL))
     log("existing_cover_refresh_complete", groups_checked=len(groups), groups_refreshed=refreshed_groups)
     return refreshed_groups
+
+
+def refresh_reported_episode_metadata(items, session):
+    """Refresh the six user-reported legacy records from their canonical episode pages."""
+    stats = {
+        "targets_found": 0, "pages_refreshed": 0, "descriptions_updated": 0,
+        "source_covers_updated": 0, "failures": 0,
+    }
+    for item in items:
+        page_url = item.get("page") or item.get("guid") or ""
+        slug = urlparse(page_url).path.strip("/").split("/")[-1].lower()
+        if slug not in REPORTED_METADATA_REPAIR_PAGES:
+            continue
+        stats["targets_found"] += 1
+        response = None
+        try:
+            response = session.get(
+                page_url, headers={**HEADERS, "Referer": SHOWS_URL}, timeout=35
+            )
+            if response.status_code >= 400:
+                stats["failures"] += 1
+                log("reported_episode_metadata_http_error", page=safe_url(page_url),
+                    status=response.status_code)
+                continue
+            soup = BeautifulSoup(response.text, "html.parser")
+            description = extract_description(soup)
+            if (description and re.search(r"(?im)^Date\s*:", description)
+                    and re.search(r"(?im)^Size\s*:", description)):
+                if description != item.get("description"):
+                    stats["descriptions_updated"] += 1
+                item["description"] = description
+
+            source_cover = extract_cover(
+                soup, getattr(response, "url", None) or page_url,
+                item.get("title") or REPORTED_METADATA_REPAIR_PAGES[slug],
+                session=session,
+            )
+            if source_cover:
+                if item.get("cover") != source_cover:
+                    stats["source_covers_updated"] += 1
+                item["cover"] = source_cover
+                # The embedded artwork sweep below must not override this page-sourced image.
+                item["_prefer_source_cover"] = True
+            else:
+                stats["failures"] += 1
+                log("reported_episode_source_cover_missing", page=safe_url(page_url))
+            stats["pages_refreshed"] += 1
+            log("reported_episode_metadata_refreshed", page=safe_url(page_url),
+                description_chars=len(item.get("description") or ""),
+                source_cover_found=bool(source_cover))
+        except requests.RequestException as exc:
+            stats["failures"] += 1
+            log("reported_episode_metadata_refresh_error", page=safe_url(page_url),
+                error=type(exc).__name__)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+    return stats
 
 
 def canonicalize_series_covers(items):
@@ -2587,7 +2691,9 @@ def main():
 
             apply_series_metadata(final_items, catalog_rows, posts)
             canonicalize_series_covers(final_items)
-            # MP3-embedded front covers override general show thumbnails across the retained archive.
+            # Repair the six reported legacy items from their actual source pages before ID3 artwork is considered.
+            metadata_refresh_stats = refresh_reported_episode_metadata(final_items, session)
+            log("reported_episode_metadata_refresh_complete", **metadata_refresh_stats)
             artwork_stats = refresh_embedded_episode_artwork(final_items, session, now)
             # Do not block a healthy RSS update when an old source episode disappears.
             # Record it for retry on every run; successful audio recovery removes it from the queue.
