@@ -45,14 +45,15 @@ jobs:
               assert enclosure.get("url", "").lower().split("?", 1)[0].endswith(".mp3")
           print("Test RSS structure passed: 50 items; audio and descriptions retained")
           PY
-      - name: Commit test RSS changes only
+      - name: Commit test RSS and extracted episode covers only
         run: |
-          if [ -z "$(git status --porcelain -- public/test-rss.xml)" ]; then
+          if [ -z "$(git status --porcelain -- public/test-rss.xml public/episode-artwork)" ]; then
             echo "No test-RSS cover changes to commit."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add public/test-rss.xml
-            git commit -m "Refresh test RSS covers from schedule calendar"
+            if [ -d public/episode-artwork ]; then git add public/episode-artwork/; fi
+            git commit -m "Refresh test RSS episode artwork"
             git push
-          fi
+          fi          fi

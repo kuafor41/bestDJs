@@ -28,6 +28,10 @@ IMAGE_RE = re.compile(r'<itunes:image\b[^>]*?href="([^"]*)"[^>]*/>')
 TITLE_RE = re.compile(r"<title>([\s\S]*?)</title>")
 LINK_RE = re.compile(r"<link>([\s\S]*?)</link>")
 ENCLOSURE_RE = re.compile(r"<enclosure\b")
+ENCLOSURE_URL_RE = re.compile(r'<enclosure\b[^>]*?\burl="([^"]*)"')
+AUDIO_ARTWORK_DIR = ROOT / "public" / "episode-artwork"
+AUDIO_ARTWORK_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/episode-artwork"
+AUDIO_ARTWORK_MAX_BYTES = 8 * 1024 * 1024
 MONTH_RE = re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s*,?\s*(20\d{2})\b", re.I)
 
 
@@ -46,12 +50,14 @@ def extract_items(xml_text: str):
         title_match = TITLE_RE.search(block)
         link_match = LINK_RE.search(block)
         cover_match = IMAGE_RE.search(block)
+        enclosure_url_match = ENCLOSURE_URL_RE.search(block)
         if not title_match:
             raise RuntimeError("An existing test-RSS item has no title.")
         items.append({
             "title": decode_element_text(title_match.group(1)),
             "page": decode_element_text(link_match.group(1)) if link_match else "",
             "cover": html.unescape(cover_match.group(1)) if cover_match else "",
+            "audio": html.unescape(enclosure_url_match.group(1)) if enclosure_url_match else "",
         })
     return items, blocks
 
@@ -591,6 +597,198 @@ def _supported_image_url(raw, base_url):
     return url
 
 
+def _syncsafe_integer(data):
+    if len(data) != 4 or any(value & 0x80 for value in data):
+        return None
+    return (data[0] << 21) | (data[1] << 14) | (data[2] << 7) | data[3]
+
+
+def _image_extension(image_bytes, mime):
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "webp"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if mime in ("image/jpeg", "image/jpg"):
+        return "jpg"
+    if mime == "image/png":
+        return "png"
+    if mime == "image/webp":
+        return "webp"
+    if mime == "image/gif":
+        return "gif"
+    return ""
+
+
+def _apic_frame_image(frame_data):
+    """Return (picture_type, mime, bytes) from an ID3v2 APIC frame."""
+    if len(frame_data) < 5:
+        return None
+    encoding = frame_data[0]
+    mime_end = frame_data.find(b"\x00", 1)
+    if mime_end < 0 or mime_end + 1 >= len(frame_data):
+        return None
+    mime = frame_data[1:mime_end].decode("latin-1", errors="replace")
+    picture_type = frame_data[mime_end + 1]
+    description_start = mime_end + 2
+    if encoding in (1, 2):
+        image_start = -1
+        for pos in range(description_start, len(frame_data) - 1, 2):
+            if frame_data[pos:pos + 2] == b"\x00\x00":
+                image_start = pos + 2
+                break
+    else:
+        desc_end = frame_data.find(b"\x00", description_start)
+        image_start = desc_end + 1 if desc_end >= 0 else -1
+    if image_start < description_start or image_start >= len(frame_data):
+        return None
+    image_bytes = frame_data[image_start:]
+    if not _image_extension(image_bytes, mime):
+        return None
+    return picture_type, mime, image_bytes
+
+
+def extract_id3_front_cover(data):
+    """Parse front-cover images from an ID3v2 tag at the start of an MP3."""
+    if len(data) < 10 or data[:3] != b"ID3":
+        return None, "no_id3v2_header"
+    version = data[3]
+    if version not in (2, 3, 4):
+        return None, f"unsupported_id3v2_version_{version}"
+    tag_size = _syncsafe_integer(data[6:10])
+    if tag_size is None:
+        return None, "invalid_id3_tag_size"
+    tag_end = 10 + tag_size
+    if tag_end > len(data):
+        return None, "id3_tag_larger_than_downloaded_range"
+    pos = 10
+    if data[5] & 0x40:
+        if version == 3:
+            if pos + 4 > tag_end:
+                return None, "truncated_extended_header"
+            pos += 4 + int.from_bytes(data[pos:pos + 4], "big")
+        elif version == 4:
+            if pos + 4 > tag_end:
+                return None, "truncated_extended_header"
+            extended_size = _syncsafe_integer(data[pos:pos + 4])
+            if extended_size is None:
+                return None, "invalid_extended_header"
+            pos += extended_size
+        else:
+            pos += 6
+
+    images = []
+    while pos < tag_end:
+        if version == 2:
+            if pos + 6 > tag_end:
+                break
+            frame_id = data[pos:pos + 3]
+            if frame_id == b"\x00\x00\x00":
+                break
+            frame_size = int.from_bytes(data[pos + 3:pos + 6], "big")
+            header_size = 6
+        else:
+            if pos + 10 > tag_end:
+                break
+            frame_id = data[pos:pos + 4]
+            if frame_id == b"\x00\x00\x00\x00":
+                break
+            frame_size = (_syncsafe_integer(data[pos + 4:pos + 8]) if version == 4
+                          else int.from_bytes(data[pos + 4:pos + 8], "big"))
+            if frame_size is None:
+                return None, "invalid_id3_frame_size"
+            header_size = 10
+        if frame_size <= 0 or pos + header_size + frame_size > tag_end:
+            break
+        frame = data[pos + header_size:pos + header_size + frame_size]
+        if (version == 2 and frame_id == b"PIC") or (version in (3, 4) and frame_id == b"APIC"):
+            if version == 2 and len(frame) >= 6:
+                fmt = frame[1:4].decode("latin-1", errors="replace").lower()
+                mime = {"jpg": "image/jpeg", "png": "image/png", "gif": "image/gif"}.get(fmt, f"image/{fmt}")
+                parsed = _apic_frame_image(b"\x03" + mime.encode("latin-1") + b"\x00" + frame[4:])
+            else:
+                parsed = _apic_frame_image(frame)
+            if parsed:
+                images.append(parsed)
+        pos += header_size + frame_size
+    if not images:
+        return None, "no_embedded_picture_frame"
+    images.sort(key=lambda value: (value[0] != 3, value[0]))
+    picture_type, mime, image_bytes = images[0]
+    return {"picture_type": picture_type, "mime": mime, "bytes": image_bytes}, "embedded_picture_found"
+
+
+def _extract_audio_embedded_cover(session, item):
+    """Extract a small ID3 cover from an already-resolved TopDJMixes MP3 enclosure."""
+    audio_url = (item.get("audio") or "").strip()
+    title = (item.get("title") or "").strip()
+    if not audio_url:
+        rss.emit("episode_audio_artwork_probe_skipped", title=title, reason="no_enclosure_url")
+        return None
+    parsed_url = urlparse(audio_url)
+    if parsed_url.scheme != "https" or parsed_url.hostname not in ("files.topdjmixes.com", "www.topdjmixes.com"):
+        rss.emit("episode_audio_artwork_probe_skipped", title=title, reason="unexpected_audio_host")
+        return None
+
+    response = None
+    try:
+        response = session.get(
+            audio_url,
+            headers={**rss.core.HEADERS, "Referer": item.get("page") or rss.SCHEDULE_URL,
+                     "Range": f"bytes=0-{AUDIO_ARTWORK_MAX_BYTES - 1}"},
+            stream=True, allow_redirects=True, timeout=(15, 35),
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        content_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+        if status not in (200, 206) or content_type not in (
+            "audio/mpeg", "audio/mp3", "application/octet-stream"
+        ):
+            rss.emit("episode_audio_artwork_probe_failed", title=title, status=status,
+                     content_type=content_type, reason="audio_range_unavailable")
+            return None
+        data = response.raw.read(AUDIO_ARTWORK_MAX_BYTES, decode_content=True)
+    except (requests.RequestException, OSError, ValueError, TypeError) as exc:
+        rss.emit("episode_audio_artwork_probe_failed", title=title, error=type(exc).__name__)
+        return None
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    parsed_cover, reason = extract_id3_front_cover(data)
+    if not parsed_cover:
+        rss.emit("episode_audio_artwork_probe_complete", title=title, result=reason,
+                 bytes_read=len(data), artwork_found=False)
+        return None
+
+    image_bytes = parsed_cover["bytes"]
+    extension = _image_extension(image_bytes, parsed_cover["mime"])
+    if not extension or not image_bytes or len(image_bytes) > 8 * 1024 * 1024:
+        rss.emit("episode_audio_artwork_probe_complete", title=title, result="invalid_or_oversized_cover",
+                 bytes_read=len(data), artwork_found=False)
+        return None
+    import hashlib
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
+    title_key = rss._compact_cover_label(title) or "episode"
+    filename = f"{title_key}-{image_hash[:12]}.{extension}"
+    destination = AUDIO_ARTWORK_DIR / filename
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists() or destination.read_bytes() != image_bytes:
+        destination.write_bytes(image_bytes)
+    cover_url = f"{AUDIO_ARTWORK_URL}/{filename}"
+    rss.emit("episode_audio_artwork_probe_complete", title=title, result=reason,
+             picture_type=parsed_cover["picture_type"], mime=parsed_cover["mime"],
+             image_bytes=len(image_bytes), sha256=image_hash, artwork_found=True,
+             cover=rss.safe_url(cover_url), local_path=str(destination.relative_to(ROOT)))
+    return {"url": cover_url, "source": "mp3_id3_front_cover", "sha256": image_hash}
+
+
 def _source_page_artwork_candidate(session, item):
     """Find artwork explicitly tied to the episode/show on its own page.
 
@@ -761,9 +959,9 @@ def _source_page_artwork_candidate(session, item):
 
 
 def repair_known_episode_page_covers(items, session):
-    """Use source-page artwork for the four known cases, with exact archive fallback."""
+    """Prefer the MP3's embedded front cover, then page artwork, then exact archive fallback."""
     archive = _production_archive_cover_index()
-    matched = replaced = kept = 0
+    matched = replaced = kept = embedded_found = 0
     for item in items:
         title = (item.get("title") or "").strip()
         title_key = rss._compact_cover_label(title)
@@ -771,9 +969,18 @@ def repair_known_episode_page_covers(items, session):
             continue
         matched += 1
         old_cover = item.get("cover") or ""
-        candidate = _source_page_artwork_candidate(session, item)
+        embedded = _extract_audio_embedded_cover(session, item)
+        candidate = None
         source = ""
-        new_cover = candidate["url"] if candidate else ""
+        new_cover = ""
+        if embedded:
+            new_cover = embedded["url"]
+            source = embedded["source"]
+            embedded_found += 1
+        else:
+            candidate = _source_page_artwork_candidate(session, item)
+            new_cover = candidate["url"] if candidate else ""
+            source = candidate["source"] if candidate else ""
 
         if not new_cover:
             page_key = urlparse(item.get("page") or "").path.rstrip("/").lower()
@@ -783,35 +990,29 @@ def repair_known_episode_page_covers(items, session):
                     new_cover = archived["cover"]
                     source = "exact_same_episode_production_archive"
                     rss.emit("episode_artwork_archive_fallback_selected", title=title,
-                             archived_title=archived.get("title", ""),
-                             cover=rss.safe_url(new_cover))
-        elif candidate:
-            source = candidate["source"]
-
+                             archived_title=archived.get("title", ""), cover=rss.safe_url(new_cover))
         if not new_cover:
             kept += 1
             rss.emit("episode_artwork_repair_kept_existing", title=title,
-                     reason="no_live_page_artwork_or_exact_archive_cover",
+                     reason="no_embedded_page_artwork_or_exact_archive_cover",
                      existing_cover=rss.safe_url(old_cover) if old_cover else None)
             continue
         if new_cover == old_cover:
             kept += 1
             rss.emit("episode_artwork_repair_kept_existing", title=title,
-                     reason="source_selected_same_url", source=source or (candidate or {}).get("source", ""),
-                     cover=rss.safe_url(old_cover))
+                     reason="source_selected_same_url", source=source, cover=rss.safe_url(old_cover))
             continue
 
         previous = old_cover
         item["cover"] = new_cover
         replaced += 1
-        rss.emit("episode_artwork_repair_applied", title=title,
-                 source=source or (candidate or {}).get("source", ""),
+        rss.emit("episode_artwork_repair_applied", title=title, source=source,
                  previous_cover=rss.safe_url(previous) if previous else None,
                  cover=rss.safe_url(new_cover))
-    result = {"targeted": matched, "replaced": replaced, "kept_existing": kept}
+    result = {"targeted": matched, "replaced": replaced, "kept_existing": kept,
+              "embedded_covers_found": embedded_found}
     rss.emit("episode_artwork_repair_complete", **result,
-             scope=sorted(SOURCE_PAGE_ARTWORK_KEYS),
-             production_rss_touched=False)
+             scope=sorted(SOURCE_PAGE_ARTWORK_KEYS), production_rss_touched=False)
     return result
 
 
