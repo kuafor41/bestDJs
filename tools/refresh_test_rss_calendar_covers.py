@@ -10,7 +10,7 @@ import html
 import re
 import sys
 from datetime import datetime, timezone
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
@@ -199,8 +199,73 @@ def next_month_control(snapshot):
     return ranked[0][1]
 
 
-def discover_calendar_covers(session, items, page):
-    """Traverse visible month views and collect unique square covers from the schedule DOM."""
+def previous_month_control(snapshot):
+    """Prefer an explicitly labelled previous-month control."""
+    ranked = []
+    for row in snapshot.get("controls", []):
+        if row.get("disabled"):
+            continue
+        label = " ".join(str(row.get(k, "")) for k in (
+            "aria", "title", "cls", "text", "href", "parentClass"
+        )).lower()
+        if re.search(r"\b(next|forward|following)\b", label):
+            continue
+        score = 0
+        if re.search(r"\b(previous month|previous|prev|back|last month)\b", label):
+            score += 100
+        if re.search(r"fc-prev|prev-month|calendar-prev|month-prev|evo-prev|evcal.*prev", label):
+            score += 120
+        if row.get("text", "").strip() in ("<", "‹", "«", "❮", "←", "⟵"):
+            score += 12
+        if re.search(r"calendar|month|schedule|event|fc-|evo|evcal", label):
+            score += 8
+        if row.get("href") and re.search(r"month|calendar|schedule|tribe-bar-date|[?&]m=", row["href"], re.I):
+            score += 10
+        if score:
+            ranked.append((score, row))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+    if not ranked:
+        return None
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0] and ranked[0][1]["index"] != ranked[1][1]["index"]:
+        return None
+    return ranked[0][1]
+
+
+def archive_history_month_count():
+    """Derive the historical scan window from the untouched production RSS archive."""
+    production_path = ROOT / "public" / "rss.xml"
+    if not production_path.exists():
+        raise RuntimeError("Cannot determine calendar history range: public/rss.xml is missing.")
+    root = ET.parse(production_path).getroot()
+    entries = root.findall("./channel/item")
+    dates = []
+    for entry in entries:
+        raw = (entry.findtext("pubDate") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        dates.append(value.astimezone(timezone.utc))
+    if not dates:
+        raise RuntimeError("Cannot determine calendar history range: production RSS has no parseable pubDates.")
+    oldest = min(dates)
+    now = datetime.now(timezone.utc)
+    count = max(1, (now.year - oldest.year) * 12 + now.month - oldest.month + 1)
+    rss.emit("schedule_calendar_archive_range",
+             archive_items=len(entries), oldest_episode_date=oldest.date().isoformat(),
+             current_utc_month=now.strftime("%B, %Y"), history_months_requested=count,
+             production_rss_touched=False)
+    return min(count, 240)
+
+
+def _discover_calendar_covers_direction(session, items, page, direction, max_months):
+    """Collect square images from one direction of the rendered schedule calendar."""
+    if direction not in ("forward", "backward"):
+        raise ValueError(f"Unsupported calendar direction: {direction}")
     try:
         page.goto(rss.SCHEDULE_URL, wait_until="domcontentloaded", timeout=45000)
         try:
@@ -209,7 +274,7 @@ def discover_calendar_covers(session, items, page):
             pass
         page.wait_for_timeout(800)
     except Exception as exc:
-        rss.emit("schedule_calendar_unavailable", error=type(exc).__name__)
+        rss.emit("schedule_calendar_unavailable", direction=direction, error=type(exc).__name__)
         return {}
 
     catalog = {}
@@ -218,6 +283,7 @@ def discover_calendar_covers(session, items, page):
     seen_signatures = set()
     seen_square_urls = set()
     scanned_months = []
+    directly_matched_items = set()
     item_keys = [
         {"key": rss._compact_cover_label(item.get("title", "")), "title": item.get("title", "")}
         for item in items
@@ -230,56 +296,48 @@ def discover_calendar_covers(session, items, page):
         if slug and key and len(key) >= 5:
             catalog[(slug, key)] = {"slug": slug, "title": title, "key": key, "url": href}
 
-    max_months = 18
-    for month_index in range(max_months):
-        try:
-            snap = schedule_snapshot(page)
-            # The calendar content may be embedded separately from the page header/footer.
-            for frame in page.frames[1:]:
-                try:
-                    frame_snap = schedule_snapshot(frame)
-                    if frame_snap.get("images") or frame_snap.get("backgrounds") or frame_snap.get("headings"):
-                        rss.emit("schedule_calendar_frame_seen",
-                                 frame=rss.safe_url(frame.url),
-                                 month=current_month(frame_snap),
-                                 visible_images=len(frame_snap.get("images", [])),
-                                 visible_backgrounds=len(frame_snap.get("backgrounds", [])),
-                                 headings=frame_snap.get("headings", [])[:8],
-                                 body_excerpt=frame_snap.get("body", "")[:180])
-                        for record in frame_snap.get("images", []) + frame_snap.get("backgrounds", []):
-                            record["base_url"] = frame_snap.get("url") or frame.url
-                        snap.setdefault("images", []).extend(frame_snap.get("images", []))
-                        snap.setdefault("backgrounds", []).extend(frame_snap.get("backgrounds", []))
-                        snap.setdefault("links", []).extend(frame_snap.get("links", []))
-                except Exception as frame_exc:
-                    rss.emit("schedule_calendar_frame_error", frame=rss.safe_url(frame.url),
-                             error=type(frame_exc).__name__)
-        except Exception as exc:
-            rss.emit("schedule_calendar_snapshot_error", month_index=month_index, error=type(exc).__name__)
-            break
+    def capture_snapshot():
+        snap = schedule_snapshot(page)
+        # The calendar content may be embedded separately from the page header/footer.
+        for frame in page.frames[1:]:
+            try:
+                frame_snap = schedule_snapshot(frame)
+                if frame_snap.get("images") or frame_snap.get("backgrounds") or frame_snap.get("headings"):
+                    for record in frame_snap.get("images", []) + frame_snap.get("backgrounds", []):
+                        record["base_url"] = frame_snap.get("url") or frame.url
+                    snap.setdefault("images", []).extend(frame_snap.get("images", []))
+                    snap.setdefault("backgrounds", []).extend(frame_snap.get("backgrounds", []))
+                    snap.setdefault("links", []).extend(frame_snap.get("links", []))
+            except Exception as frame_exc:
+                rss.emit("schedule_calendar_frame_error", direction=direction,
+                         frame=rss.safe_url(frame.url), error=type(frame_exc).__name__)
+        return snap
 
+    def collect_month(snap, month_index):
         month = current_month(snap) or f"Month view {month_index + 1}"
         for link in snap.get("links", []):
-            add_link(link.get("href", ""), link.get("text") or link.get("title", ""), snap.get("url") or rss.SCHEDULE_URL)
+            add_link(link.get("href", ""), link.get("text") or link.get("title", ""),
+                     snap.get("url") or rss.SCHEDULE_URL)
 
+        image_records = snap.get("images", []) + snap.get("backgrounds", [])
         signature = (
             month,
-            tuple(sorted(src for img in snap.get("images", []) for src in img.get("sources", []) if src)),
+            tuple(sorted(src for img in image_records for src in img.get("sources", []) if src)),
         )
         if signature in seen_signatures:
-            rss.emit("schedule_calendar_navigation_stopped", reason="repeated_month_content", month=month)
-            break
+            rss.emit("schedule_calendar_navigation_stopped", direction=direction,
+                     reason="repeated_month_content", month=month)
+            return False
         seen_signatures.add(signature)
         scanned_months.append(month)
 
         new_urls = set()
-        image_records = snap.get("images", []) + snap.get("backgrounds", [])
         for img in image_records:
             labels = [img.get("alt", ""), img.get("title", "")]
             for context in img.get("contexts", []):
-                text = context.get("text", "")
-                if text and len(text) <= 260 and len(context.get("links", [])) <= 6:
-                    labels.append(text)
+                context_text = context.get("text", "")
+                if context_text and len(context_text) <= 260 and len(context.get("links", [])) <= 6:
+                    labels.append(context_text)
                 for link in context.get("links", []):
                     labels.extend([link.get("text", ""), link.get("title", "")])
                     if link.get("href"):
@@ -288,10 +346,14 @@ def discover_calendar_covers(session, items, page):
                           if value and len(rss._compact_cover_label(value)) >= 5]
 
             for raw in img.get("sources", []):
-                url = urljoin(img.get("base_url") or snap.get("url") or rss.SCHEDULE_URL, html.unescape(str(raw or "").strip()))
+                url = urljoin(img.get("base_url") or snap.get("url") or rss.SCHEDULE_URL,
+                              html.unescape(str(raw or "").strip()))
                 parsed = urlparse(url)
-                if parsed.scheme not in ("http", "https") or not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
+                if parsed.scheme not in ("http", "https") or not re.search(
+                    r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I
+                ):
                     continue
+
                 filename_key = rss._compact_cover_label(parsed.path.rsplit("/", 1)[-1])
                 match_labels = normalized + ([filename_key] if filename_key else [])
                 if not match_labels:
@@ -312,74 +374,64 @@ def discover_calendar_covers(session, items, page):
 
                 if not show_matches and not episode_matches:
                     continue
-                score = rss._square_variant_score(session, url, img.get("width", 0),
-                                                  img.get("height", 0), dimension_cache)
+                score = rss._square_variant_score(
+                    session, url, img.get("width", 0), img.get("height", 0), dimension_cache
+                )
                 if score is None:
                     continue
+
                 new_urls.add(url)
                 seen_square_urls.add(url)
-
                 for entry in show_matches:
                     row = {"title": entry["title"], "key": entry["key"], "slug": entry["slug"],
                            "cover": url, "source": "schedule_calendar", "month": month}
                     cover_rows[(row["key"], url)] = row
                 for entry in episode_matches:
+                    directly_matched_items.add(entry["title"])
                     row = {"title": entry["title"], "key": entry["key"], "slug": "",
                            "cover": url, "source": "schedule_calendar_episode", "month": month}
                     cover_rows[(row["key"], url)] = row
 
-        image_samples = []
-        if month_index == 0:
-            for img in snap.get("images", [])[:10]:
-                sample_sources = []
-                for src in img.get("sources", [])[:4]:
-                    u = urljoin(snap.get("url") or rss.SCHEDULE_URL, str(src or ""))
-                    sample_sources.append(rss.safe_url(u))
-                sample_contexts = []
-                for ctx in img.get("contexts", [])[:3]:
-                    sample_contexts.append({
-                        "class": ctx.get("cls", ""),
-                        "text": (ctx.get("text", "") or "")[:180],
-                        "links": [{
-                            "text": link.get("text", ""),
-                            "href": rss.safe_url(link.get("href", "")) if link.get("href") else None
-                        } for link in ctx.get("links", [])[:4]]
-                    })
-                image_samples.append({
-                    "sources": sample_sources,
-                    "alt": img.get("alt", ""),
-                    "title": img.get("title", ""),
-                    "pixel_size": [img.get("width", 0), img.get("height", 0)],
-                    "contexts": sample_contexts
-                })
-            for img in snap.get("backgrounds", [])[:10]:
-                sample_sources = [rss.safe_url(urljoin(img.get("base_url") or snap.get("url") or rss.SCHEDULE_URL, src))
-                                  for src in img.get("sources", [])[:4]]
-                image_samples.append({
-                    "kind": "css-background",
-                    "sources": sample_sources,
-                    "alt": img.get("alt", ""),
-                    "title": img.get("title", ""),
-                    "pixel_size": [img.get("width", 0), img.get("height", 0)],
-                    "contexts": [{"class": ctx.get("cls", ""), "text": (ctx.get("text", "") or "")[:180],
-                                  "links": [{"text": link.get("text", ""), "href": rss.safe_url(link.get("href", "")) if link.get("href") else None}
-                                            for link in ctx.get("links", [])[:4]]}
-                                 for ctx in img.get("contexts", [])[:3]]
-                })
-        rss.emit("schedule_calendar_month_scanned", month=month,
-                 visible_images=len(snap.get("images", [])), visible_backgrounds=len(snap.get("backgrounds", [])),
-                 iframes=len(snap.get("iframes", [])), new_square_urls=len(new_urls), unique_square_urls=len(seen_square_urls),
-                 catalog_entries=len(catalog), url=rss.safe_url(snap.get("url") or rss.SCHEDULE_URL),
-                 image_samples=image_samples)
+        rss.emit("schedule_calendar_month_scanned",
+                 direction=direction, month=month, visible_images=len(snap.get("images", [])),
+                 visible_backgrounds=len(snap.get("backgrounds", [])),
+                 new_square_urls=len(new_urls), unique_square_urls=len(seen_square_urls),
+                 catalog_entries=len(catalog), cover_associations=len(cover_rows),
+                 direct_episode_matches=sorted(directly_matched_items)[:40],
+                 url=rss.safe_url(snap.get("url") or rss.SCHEDULE_URL))
+        return True
 
-        nxt = next_month_control(snap)
-        if not nxt:
-            rss.emit("schedule_calendar_navigation_stopped", reason="next_month_control_not_found",
-                     month=month, months_scanned=len(scanned_months),
+    for month_index in range(max_months):
+        try:
+            snap = capture_snapshot()
+        except Exception as exc:
+            rss.emit("schedule_calendar_snapshot_error", direction=direction,
+                     month_index=month_index, error=type(exc).__name__)
+            break
+
+        month = current_month(snap) or f"Month view {month_index + 1}"
+        if not collect_month(snap, month_index):
+            break
+
+        if month_index >= max_months - 1:
+            rss.emit("schedule_calendar_direction_complete", direction=direction,
+                     months_scanned=len(scanned_months), requested_months=max_months,
+                     first_month=scanned_months[0] if scanned_months else "",
+                     last_month=scanned_months[-1] if scanned_months else "",
+                     unique_square_urls=len(seen_square_urls),
+                     cover_associations=len(cover_rows), catalog_entries=len(catalog))
+            break
+
+        control = next_month_control(snap) if direction == "forward" else previous_month_control(snap)
+        if not control:
+            rss.emit("schedule_calendar_navigation_stopped", direction=direction,
+                     reason="month_navigation_control_not_found", month=month,
+                     months_scanned=len(scanned_months), requested_months=max_months,
                      controls=[{"text": row.get("text"), "aria": row.get("aria"),
                                 "title": row.get("title"), "class": row.get("cls"),
                                 "href": row.get("href")} for row in snap.get("controls", [])
-                               if re.search(r"next|month|calendar|›|»|→", str(row).lower())][:20])
+                               if re.search(r"next|prev|previous|month|calendar|›|»|→|‹|«|←",
+                                            str(row).lower())][:20])
             break
 
         old_month, old_url = month, snap.get("url", "")
@@ -389,7 +441,7 @@ def discover_calendar_covers(session, items, page):
               const all=[...document.querySelectorAll('button,a,[role=button],input[type=button]')].filter(visible);
               if(!all[index]) return false;
               all[index].click(); return true;
-            }""", nxt["index"])
+            }""", control["index"])
             page.wait_for_timeout(800)
             advanced = None
             for _ in range(3):
@@ -400,21 +452,45 @@ def discover_calendar_covers(session, items, page):
                 page.wait_for_timeout(600)
             new_month = current_month(advanced or {})
             if not advanced or ((new_month == old_month or not new_month) and advanced.get("url") == old_url):
-                rss.emit("schedule_calendar_navigation_stopped", reason="month_did_not_change",
-                         month=old_month, control=nxt)
+                rss.emit("schedule_calendar_navigation_stopped", direction=direction,
+                         reason="month_did_not_change", month=old_month, control=control,
+                         months_scanned=len(scanned_months), requested_months=max_months)
                 break
         except Exception as exc:
-            rss.emit("schedule_calendar_navigation_error", month=old_month, error=type(exc).__name__)
+            rss.emit("schedule_calendar_navigation_error", direction=direction,
+                     month=old_month, error=type(exc).__name__)
             break
 
     result = list(cover_rows.values())
-    rss.emit("schedule_calendar_cover_index_complete", months_scanned=len(scanned_months),
-             months=scanned_months, unique_square_urls=len(seen_square_urls),
-             cover_associations=len(result), catalog_entries=len(catalog),
-             sample=[{"title": row["title"], "cover": rss.safe_url(row["cover"]),
-                      "source": row["source"], "month": row["month"]} for row in result[:12]])
+    rss.emit("schedule_calendar_cover_direction_index_complete", direction=direction,
+             months_scanned=len(scanned_months), months=scanned_months,
+             unique_square_urls=len(seen_square_urls), cover_associations=len(result),
+             catalog_entries=len(catalog), directly_matched_items=sorted(directly_matched_items))
     return {f"{row['key']}|{row['cover']}": row for row in result}
 
+
+def discover_calendar_covers(session, items, page):
+    """Index forward schedule images and the archive's entire historical month range."""
+    history_months = archive_history_month_count()
+    forward = _discover_calendar_covers_direction(
+        session, items, page, direction="forward", max_months=18
+    )
+    backward = _discover_calendar_covers_direction(
+        session, items, page, direction="backward", max_months=history_months
+    )
+    # Keep both variants if a show's artwork changed over time. The matcher then
+    # chooses an exact episode-key match or safely rejects conflicting show-level art.
+    combined = dict(backward)
+    combined.update(forward)
+    rows = list(combined.values())
+    rss.emit("schedule_calendar_cover_index_complete",
+             months_scanned_forward=18, months_requested_backward=history_months,
+             cover_associations=len(rows),
+             unique_square_urls=len({row["cover"] for row in rows}),
+             distinct_title_keys=len({row["key"] for row in rows}),
+             catalog_entries=len({(row.get("slug", ""), row.get("key", "")) for row in rows}),
+             note="Historical and future schedule calendar views indexed; production RSS read-only.")
+    return combined
 
 def apply_calendar_covers(items, session, page):
     covers = discover_calendar_covers(session, items, page)
@@ -425,6 +501,25 @@ def apply_calendar_covers(items, session, page):
     for item in items:
         choice = rss._match_schedule_cover(item.get("title", ""), covers)
         if not choice:
+            title = item.get("title", "")
+            episode_key = rss._compact_cover_label(title)
+            prefix_rows = [row for row in covers.values()
+                           if row.get("key") and episode_key.startswith(row["key"])]
+            if not prefix_rows:
+                reason = "no_matching_calendar_association"
+                candidate_rows = []
+            else:
+                longest = max(len(row["key"]) for row in prefix_rows)
+                candidate_rows = [row for row in prefix_rows if len(row["key"]) == longest]
+                reason = ("conflicting_cover_variants"
+                          if len({row.get("cover") for row in candidate_rows}) > 1
+                          else "matcher_rule_rejected_candidate")
+            rss.emit("schedule_calendar_cover_unmatched", title=title, reason=reason,
+                     candidate_variants=[{"show": row.get("title", ""),
+                                          "month": row.get("month", ""),
+                                          "source": row.get("source", ""),
+                                          "cover": rss.safe_url(row.get("cover", ""))}
+                                         for row in candidate_rows[:8]])
             continue
         matched += 1
         url = choice["cover"]
@@ -439,9 +534,12 @@ def apply_calendar_covers(items, session, page):
             replaced += 1
         rss.emit("schedule_calendar_cover_applied", title=item.get("title", ""),
                  show=choice.get("title", ""), changed=(previous != url), cover=rss.safe_url(url))
+    unmatched_titles = [item.get("title", "") for item in items
+                        if not rss._match_schedule_cover(item.get("title", ""), covers)]
     summary = {"matched": matched, "replaced": replaced,
                "unmatched": len(items) - matched, "rejected": rejected}
-    rss.emit("schedule_calendar_cover_update_complete", episodes=len(items), **summary)
+    rss.emit("schedule_calendar_cover_update_complete", episodes=len(items),
+             unmatched_titles=unmatched_titles, **summary)
     return summary
 
 
