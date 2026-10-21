@@ -230,15 +230,16 @@ def extract_cover(soup: BeautifulSoup, page_url: str, episode_title: str):
 
 
 def _compact_cover_label(value):
-    """Normalize display names and filenames for safe prefix matching."""
-    value = html.unescape(str(value or "")).lower()
-    value = re.sub(r"\.(?:jpe?g|png|webp|avif|gif)(?:$|\?).*$", "", value, flags=re.I)
-    value = re.sub(r"[-_]\d{1,5}x\d{1,5}(?=[^0-9])", "", value)
+    """Normalize show names and image filenames while ignoring WordPress size suffixes."""
+    value = html.unescape(str(value or "")).lower().strip()
+    value = re.sub(r"[?#].*$", "", value)
+    value = re.sub(r"\.(?:jpe?g|png|webp|avif|gif)$", "", value, flags=re.I)
+    value = re.sub(r"[-_]\d{2,5}x\d{2,5}$", "", value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
 
-def _schedule_slug(href):
-    url = urljoin(SCHEDULE_URL, str(href or "").strip())
+def _schedule_slug(href, base_url=None):
+    url = urljoin(base_url or SCHEDULE_URL, str(href or "").strip())
     parsed = urlparse(url)
     if parsed.hostname not in ("www.topdjmixes.com", "topdjmixes.com"):
         return ""
@@ -255,143 +256,53 @@ def _schedule_slug(href):
     return slug
 
 
-def _image_url_square_score(url, width=0, height=0):
-    """Return a high score only for image URLs with credible square dimensions."""
+def _square_variant_score(url, width=0, height=0):
+    """Accept only square URLs or explicitly square image elements; never square-crop mentally."""
     parsed = urlparse(url)
-    path = parsed.path.lower()
-    if not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", path, re.I):
+    if not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
         return None
-
-    match = re.search(r"[-_](\d{2,5})x(\d{2,5})(?=[^0-9])", path, re.I)
+    match = re.search(r"[-_](\d{2,5})x(\d{2,5})(?=\\.[^.]+$)", parsed.path, re.I)
     if match:
         w, h = int(match.group(1)), int(match.group(2))
         if w != h:
             return None
-        return 10000 + min(w, 5000)
-
-    params = parse_qs(parsed.query)
-    def query_dimension(names):
-        for name in names:
-            values = params.get(name)
-            if values:
-                match_value = re.match(r"\s*(\d{2,5})", str(values[0]))
-                if match_value:
-                    return int(match_value.group(1))
-        return 0
-
-    query_w = query_dimension(("w", "width"))
-    query_h = query_dimension(("h", "height"))
-    if not (query_w and query_h):
-        for name in ("resize", "crop", "fit"):
-            values = params.get(name)
-            if values:
-                dimensions = re.search(r"(\d{2,5})\s*[,x]\s*(\d{2,5})", str(values[0]))
-                if dimensions:
-                    query_w, query_h = int(dimensions.group(1)), int(dimensions.group(2))
-                    break
-    if query_w and query_h:
-        if query_w != query_h:
-            return None
-        return 8000 + min(query_w, 5000)
-
+        return 100000 + min(w, 20000)
     try:
-        width, height = int(width or 0), int(height or 0)
+        w, h = int(width or 0), int(height or 0)
     except (TypeError, ValueError):
-        width, height = 0, 0
-    if width >= 64 and width == height:
-        return 5000 + min(width, 5000)
+        w, h = 0, 0
+    if w >= 64 and w == h:
+        return 50000 + min(w, 20000)
     return None
 
 
 def _image_source_urls(node):
-    """Gather responsive-image alternatives without guessing or altering their URLs."""
+    """Read the actual rendered image candidates, not the enclosing link to the landscape original."""
     values = []
-    for attr in ("data-src", "data-lazy-src", "data-original", "src", "data-background-image"):
+    for attr in ("data-src", "data-lazy-src", "data-original", "src"):
         raw = node.get(attr)
         if raw:
             values.append(raw)
     for attr in ("srcset", "data-srcset"):
         raw = node.get(attr, "")
-        if raw:
-            for entry in raw.split(","):
-                candidate = entry.strip().split()
-                if candidate:
-                    values.append(candidate[0])
+        for entry in raw.split(","):
+            parts = entry.strip().split()
+            if parts:
+                values.append(parts[0])
     style = node.get("style", "")
     if style:
-        values.extend(match.strip().strip("'\"") for match in re.findall(r"url\((.*?)\)", style, re.I))
+        values.extend(
+            match.strip().strip("'\"")
+            for match in re.findall(r"url\((.*?)\)", style, re.I)
+        )
     return values
 
 
-def _square_images_in_container(container, page_url, show_title):
-    """Collect square variants associated with one nearby show card/list entry."""
-    visual_nodes = []
-    if getattr(container, "name", None) in ("img", "source") or getattr(container, "has_attr", lambda _x: False)("style"):
-        visual_nodes.append(container)
-    visual_nodes.extend(container.select("img, source, [style]"))
-    unique_nodes = []
-    seen_nodes = set()
-    for node in visual_nodes:
-        identity = id(node)
-        if identity not in seen_nodes:
-            seen_nodes.add(identity)
-            unique_nodes.append(node)
-
-    images = list(container.select("img, source"))
-    if getattr(container, "name", None) in ("img", "source") and container not in images:
-        images.insert(0, container)
-    image_count = len(images)
-    nearby_links = list(container.select("a[href]"))
-    if getattr(container, "name", None) == "a" and container not in nearby_links:
-        nearby_links.insert(0, container)
-
-    show_key = _compact_cover_label(show_title)
-    results = []
-    for node in unique_nodes:
-        attrs = node.attrs if hasattr(node, "attrs") else {}
-        alt = attrs.get("alt", "") or ""
-        title = attrs.get("title", "") or ""
-        parent_link = node.find_parent("a", href=True) if hasattr(node, "find_parent") else None
-        link_text = ""
-        if parent_link is not None:
-            link_text = " ".join((
-                parent_link.get_text(" ", strip=True),
-                parent_link.get("title", "") or "",
-                parent_link.get("aria-label", "") or "",
-            ))
-        for raw in _image_source_urls(node):
-            url = urljoin(page_url, html.unescape(str(raw or "").strip()))
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                continue
-            lower_label = " ".join((url, str(alt), str(title), link_text)).lower()
-            if any(marker in lower_label for marker in (
-                "favicon", "placeholder", "spinner", "advert", "banner", "avatar", "site-logo"
-            )):
-                continue
-            width = attrs.get("width", 0)
-            height = attrs.get("height", 0)
-            square_score = _image_url_square_score(url, width, height)
-            if square_score is None:
-                continue
-            label_key = _compact_cover_label(" ".join((urlparse(url).path.rsplit("/", 1)[-1], str(alt), str(title), link_text)))
-            label_match = bool(show_key and show_key in label_key)
-            # A nearby single image in a compact container containing this show's link
-            # is a usable association even when the site omitted alt/title attributes.
-            nearby_match = image_count == 1 and len(nearby_links) <= 4
-            if not label_match and not nearby_match:
-                continue
-            confidence = 100000 if label_match else 1000
-            results.append({
-                "url": url,
-                "score": confidence + square_score,
-                "label_match": label_match,
-            })
-    return results
-
-
-def discover_schedule_covers(session):
-    """Index square artwork shown beside TopDJMixes schedule entries; failure is non-fatal."""
+def discover_schedule_covers(session, items):
+    """
+    Use /schedule/ only as the canonical show-name/link index, then inspect each
+    matched show's archive HTML for its square thumbnail src/srcset.
+    """
     try:
         response = session.get(
             SCHEDULE_URL,
@@ -400,113 +311,135 @@ def discover_schedule_covers(session):
         )
         if response.status_code >= 400:
             emit("schedule_cover_index_unavailable", status=response.status_code)
-            return []
+            return {}
     except requests.RequestException as exc:
         emit("schedule_cover_index_unavailable", error=type(exc).__name__)
-        return []
+        return {}
 
     soup = BeautifulSoup(response.text, "html.parser")
     entries = {}
     ignored_names = {
-        "mixshows", "musicplayer", "news", "linklists", "schedule",
-        "mobileapp", "login", "register", "home", "next", "previous",
+        "Mix Shows", "Music Player", "News", "Linklists", "Schedule",
+        "Login", "Register", "Next", "Previous", "Home",
     }
     for anchor in soup.select("a[href]"):
-        slug = _schedule_slug(anchor.get("href", ""))
-        if not slug:
+        slug = _schedule_slug(anchor.get("href", ""), response.url)
+        title = anchor.get_text(" ", strip=True)
+        if not slug or not title or title in ignored_names:
             continue
-        image = anchor.select_one("img")
-        label = " ".join((
-            anchor.get_text(" ", strip=True),
-            anchor.get("title", "") or "",
-            anchor.get("aria-label", "") or "",
-            image.get("alt", "") if image else "",
-            image.get("title", "") if image else "",
-        )).strip()
-        compact_name = _compact_cover_label(label)
-        if not compact_name or compact_name in ignored_names or len(compact_name) < 3:
+        compact_title = _compact_cover_label(title)
+        if len(compact_title) < 3:
             continue
-        visible_title = anchor.get_text(" ", strip=True)
+        url = urljoin(response.url, anchor.get("href", ""))
         if slug not in entries:
-            entries[slug] = {"slug": slug, "title": visible_title or label, "anchors": []}
-        elif visible_title and len(visible_title) > len(entries[slug]["title"]):
-            entries[slug]["title"] = visible_title
-        entries[slug]["anchors"].append(anchor)
-
-    covers_by_slug = {}
-    # First, associate images with the closest compact container holding a show link.
-    for slug, entry in entries.items():
-        title = entry["title"]
-        best = None
-        for anchor in entry["anchors"]:
-            node = anchor
-            for _depth in range(7):
-                if node is None or getattr(node, "name", None) in ("body", "html"):
-                    break
-                links = list(node.select("a[href]"))
-                if getattr(node, "name", None) == "a":
-                    links.insert(0, node)
-                has_this_show = any(_schedule_slug(link.get("href", "")) == slug for link in links)
-                if has_this_show and len(links) <= 4:
-                    candidates = _square_images_in_container(node, response.url, title)
-                    if candidates:
-                        current = max(candidates, key=lambda candidate: candidate["score"])
-                        if best is None or current["score"] > best["score"]:
-                            best = current
-                        # The nearest card/list wrapper is the most trustworthy association.
-                        break
-                node = node.parent
-
-        # Some layouts put the image in a separate linked element; its alt or filename
-        # can still unambiguously identify the show.
-        if best is None:
-            show_key = _compact_cover_label(title)
-            for image_node in soup.select("img, source, [style]"):
-                candidates = _square_images_in_container(image_node, response.url, title)
-                for candidate in candidates:
-                    if candidate["label_match"] and (best is None or candidate["score"] > best["score"]):
-                        best = candidate
-
-        if best:
-            covers_by_slug[slug] = {
+            entries[slug] = {
                 "slug": slug,
                 "title": title,
-                "key": _compact_cover_label(title),
-                "cover": best["url"],
-                "score": best["score"],
+                "key": compact_title,
+                "url": url,
             }
 
-    # Also catch images whose alt/title/filename names a show but whose link is separate.
-    for image_node in soup.select("img, source, [style]"):
-        for candidate in _square_images_in_container(image_node, response.url, ""):
-            label = _compact_cover_label(candidate["url"])
-            if not label:
-                continue
-            for slug, entry in entries.items():
-                key = _compact_cover_label(entry["title"])
-                if key and key in label:
-                    existing = covers_by_slug.get(slug)
-                    if existing is None or candidate["score"] > existing["score"]:
-                        covers_by_slug[slug] = {
-                            "slug": slug, "title": entry["title"], "key": key,
-                            "cover": candidate["url"], "score": candidate["score"],
-                        }
+    # Resolve each RSS title to the longest unambiguous show-name prefix first.
+    needed = {}
+    for item in items:
+        episode_key = _compact_cover_label(item.get("title", ""))
+        matches = [
+            row for row in entries.values()
+            if row["key"] and episode_key.startswith(row["key"])
+        ]
+        if not matches:
+            continue
+        longest = max(len(row["key"]) for row in matches)
+        matches = [row for row in matches if len(row["key"]) == longest]
+        urls = {row["url"] for row in matches}
+        if len(urls) != 1:
+            emit("schedule_cover_match_ambiguous", title=item.get("title", ""),
+                 shows=[row["title"] for row in matches])
+            continue
+        needed[matches[0]["slug"]] = matches[0]
 
-    result = sorted(covers_by_slug.values(), key=lambda entry: entry["title"].lower())
-    emit(
-        "schedule_cover_index_complete",
-        show_links=len(entries),
-        square_covers_found=len(result),
-        sample=[{"show": row["title"], "cover": safe_url(row["cover"])} for row in result[:8]],
-    )
-    return result
+    covers = {}
+    for slug, show in needed.items():
+        try:
+            archive = session.get(
+                show["url"],
+                headers={**core.HEADERS, "Referer": SCHEDULE_URL},
+                timeout=30,
+            )
+            if archive.status_code >= 400:
+                emit("schedule_show_archive_unavailable", show=show["title"],
+                     status=archive.status_code)
+                continue
+        except requests.RequestException as exc:
+            emit("schedule_show_archive_unavailable", show=show["title"],
+                 error=type(exc).__name__)
+            continue
+
+        archive_soup = BeautifulSoup(archive.text, "html.parser")
+        best = None
+        for node in archive_soup.select("img, source"):
+            alt = node.get("alt", "") or ""
+            title_attr = node.get("title", "") or ""
+            parent_link = node.find_parent("a", href=True)
+            parent_label = ""
+            if parent_link is not None:
+                parent_label = " ".join((
+                    parent_link.get_text(" ", strip=True),
+                    parent_link.get("title", "") or "",
+                    parent_link.get("aria-label", "") or "",
+                ))
+            # Only accept images whose own metadata/name identifies this show.
+            # Do not use anchor[href]: those commonly point to 1250x569 banners.
+            label_key = _compact_cover_label(" ".join((
+                urlparse(archive.url).path,
+                alt,
+                title_attr,
+                parent_label,
+            )))
+            identity_match = (
+                show["key"] in _compact_cover_label(alt)
+                or show["key"] in _compact_cover_label(title_attr)
+                or show["key"] in _compact_cover_label(parent_label)
+            )
+
+            for raw in _image_source_urls(node):
+                url = urljoin(archive.url, html.unescape(str(raw or "").strip()))
+                score = _square_variant_score(url, node.get("width", 0), node.get("height", 0))
+                if score is None:
+                    continue
+                filename_key = _compact_cover_label(urlparse(url).path.rsplit("/", 1)[-1])
+                file_identity_match = bool(show["key"] and show["key"] in filename_key)
+                if not (identity_match or file_identity_match):
+                    continue
+                candidate_score = score + (1000000 if identity_match else 100000)
+                if best is None or candidate_score > best["score"]:
+                    best = {"url": url, "score": candidate_score}
+
+        if best:
+            covers[slug] = {
+                **show,
+                "cover": best["url"],
+            }
+            emit("schedule_square_cover_found", show=show["title"],
+                 cover=safe_url(best["url"]))
+        else:
+            emit("schedule_square_cover_not_found", show=show["title"],
+                 archive=safe_url(show["url"]))
+
+        time.sleep(PAUSE if PAUSE > 0 else 0)
+
+    emit("schedule_cover_index_complete",
+         schedule_shows=len(entries),
+         matched_shows=len(needed),
+         square_covers_found=len(covers))
+    return covers
 
 
 def _match_schedule_cover(episode_title, schedule_covers):
-    """Only match when the episode title begins with one unambiguous scheduled show name."""
+    """Match the longest unique show-name prefix; return None for uncertain matches."""
     episode_key = _compact_cover_label(episode_title)
     matches = [
-        row for row in schedule_covers
+        row for row in schedule_covers.values()
         if row.get("key") and episode_key.startswith(row["key"])
     ]
     if not matches:
@@ -520,7 +453,7 @@ def _match_schedule_cover(episode_title, schedule_covers):
 
 
 def _schedule_image_is_live(session, url, cache):
-    """Do not replace artwork with a dead URL or a URL returning an HTML challenge page."""
+    """Do not replace a current cover with a dead URL or an HTML challenge page."""
     if url in cache:
         return cache[url]
     response = None
@@ -550,8 +483,8 @@ def _schedule_image_is_live(session, url, cache):
 
 
 def apply_schedule_covers(items, session):
-    """Replace only confidently matched, square and live schedule covers; preserve all others."""
-    schedule_covers = discover_schedule_covers(session)
+    """Apply only matched, reachable square thumbnail URLs; keep every other old cover."""
+    schedule_covers = discover_schedule_covers(session, items)
     if not schedule_covers:
         emit("schedule_cover_update_skipped", reason="no_square_schedule_covers")
         return {"matched": 0, "replaced": 0, "unmatched": len(items), "rejected": 0}
@@ -586,7 +519,6 @@ def apply_schedule_covers(items, session):
     }
     emit("schedule_cover_update_complete", episodes=len(items), **summary)
     return summary
-
 
 
 def is_episode_page(soup: BeautifulSoup):
