@@ -54,6 +54,83 @@ def extract_items(xml_text: str):
     return items, blocks
 
 
+def schedule_snapshot(page):
+    """Capture rendered month headings, navigation controls, and image context."""
+    return page.evaluate("""() => {
+      const visible = e => {
+        if (!e) return false;
+        const s = window.getComputedStyle(e);
+        return s.display !== 'none' && s.visibility !== 'hidden' &&
+               Number(s.opacity || 1) > 0 && e.getClientRects().length > 0;
+      };
+      const clean = (v, n = 260) => String(v || '')
+        .split(String.fromCharCode(13)).join(' ')
+        .split(String.fromCharCode(10)).join(' ')
+        .split(String.fromCharCode(9)).join(' ')
+        .trim().slice(0, n);
+      const cls = e => typeof e.className === 'string' ? e.className : (e.getAttribute('class') || '');
+      const headings = [...document.querySelectorAll("h1,h2,h3,h4,[aria-live],[class*='month' i],[class*='calendar-title' i]")]
+        .filter(visible).map(e => clean(e.innerText || e.textContent, 100)).filter(Boolean);
+      const controls = [...document.querySelectorAll("button,a,[role='button'],input[type='button']")]
+        .filter(visible).map((e, index) => ({
+          index, tag: e.tagName.toLowerCase(),
+          text: clean(e.innerText || e.value || e.textContent, 50),
+          aria: clean(e.getAttribute('aria-label'), 100),
+          title: clean(e.getAttribute('title'), 100),
+          cls: clean(cls(e), 160), href: e.href || '',
+          disabled: Boolean(e.disabled || e.getAttribute('aria-disabled') === 'true'),
+          parentClass: clean(cls(e.parentElement), 120)
+        }));
+      const links = [...document.querySelectorAll('a[href]')].filter(visible).map(a => ({
+        text: clean(a.innerText || a.getAttribute('aria-label') || a.title, 100),
+        title: clean(a.title || a.getAttribute('aria-label'), 100),
+        href: a.href || ''
+      }));
+      const images = [...document.images].filter(img => visible(img) &&
+        (img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src')))
+        .map(img => {
+          const contexts = [];
+          let p = img.parentElement;
+          for (let depth = 0; p && depth < 5; depth++, p = p.parentElement) {
+            const ls = [...p.querySelectorAll('a[href]')].slice(0, 6).map(a => ({
+              text: clean(a.innerText || a.getAttribute('aria-label') || a.title, 100),
+              title: clean(a.title || a.getAttribute('aria-label'), 100),
+              href: a.href || ''
+            }));
+            contexts.push({
+              text: clean(p.innerText || p.textContent, 260),
+              cls: clean(cls(p), 120),
+              links: ls
+            });
+          }
+          const sources = [];
+          for (const attr of ['currentSrc','src','data-src','data-lazy-src','data-original']) {
+            const v = attr === 'currentSrc' ? img.currentSrc : img.getAttribute(attr);
+            if (v) sources.push(v);
+          }
+          for (const attr of ['srcset','data-srcset']) {
+            const value = img.getAttribute(attr) || '';
+            for (const part of value.split(',')) {
+              const candidate = part.trim().split(String.fromCharCode(32))[0];
+              if (candidate) sources.push(candidate);
+            }
+          }
+          return {
+            sources: [...new Set(sources)],
+            alt: clean(img.alt, 120), title: clean(img.title, 120),
+            width: img.naturalWidth || img.width || 0,
+            height: img.naturalHeight || img.height || 0,
+            contexts
+          };
+        });
+      return {
+        url: location.href,
+        title: clean(document.title, 120),
+        body: clean(document.body ? document.body.innerText : '', 10000),
+        headings, controls, links, images
+      };
+    }""");
+
 def current_month(snapshot):
     for value in snapshot.get("headings", []):
         hit = MONTH_RE.search(value)
@@ -129,7 +206,7 @@ def discover_calendar_covers(session, items, page):
     max_months = 18
     for month_index in range(max_months):
         try:
-            snap = rss._schedule_calendar_snapshot(page)
+            snap = schedule_snapshot(page)
         except Exception as exc:
             rss.emit("schedule_calendar_snapshot_error", month_index=month_index, error=type(exc).__name__)
             break
