@@ -382,204 +382,243 @@ def _image_source_urls(node):
     return values
 
 
-def discover_schedule_covers(session, items):
-    """
-    Use /schedule/ for show names, then inspect one matching episode page per show.
-    The visible thumbnail is on the episode detail page; an enclosing link can be
-    a different, wide original image. Only accept actual square image sources.
-    """
+def discover_schedule_covers(session, items, browser_page):
+    """Browse the rendered schedule calendar month-by-month and index its square covers."""
     try:
-        response = session.get(
-            SCHEDULE_URL,
-            headers={**core.HEADERS, "Referer": BASE + "/mix-shows/"},
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            emit("schedule_cover_index_unavailable", status=response.status_code)
-            return {}
-    except requests.RequestException as exc:
-        emit("schedule_cover_index_unavailable", error=type(exc).__name__)
+        browser_page.goto(SCHEDULE_URL, wait_until="domcontentloaded", timeout=45000)
+        try:
+            browser_page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        browser_page.wait_for_timeout(800)
+    except Exception as exc:
+        emit("schedule_calendar_unavailable", error=type(exc).__name__)
         return {}
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    entries = {}
-    ignored_names = {
-        "Mix Shows", "Music Player", "News", "Linklists", "Schedule",
-        "Login", "Register", "Next", "Previous", "Home",
-    }
-    for anchor in soup.select("a[href]"):
-        slug = _schedule_slug(anchor.get("href", ""), response.url)
-        title = anchor.get_text(" ", strip=True)
-        if not slug or not title or title in ignored_names:
-            continue
-        compact_title = _compact_cover_label(title)
-        if len(compact_title) < 3:
-            continue
-        url = urljoin(response.url, anchor.get("href", ""))
-        if slug not in entries:
-            entries[slug] = {
-                "slug": slug,
-                "title": title,
-                "key": compact_title,
-                "url": url,
-            }
-
-    needed = {}
-    for item in items:
-        episode_key = _compact_cover_label(item.get("title", ""))
-        matches = [
-            row for row in entries.values()
-            if row["key"] and episode_key.startswith(row["key"])
-        ]
-        if not matches:
-            continue
-        longest = max(len(row["key"]) for row in matches)
-        matches = [row for row in matches if len(row["key"]) == longest]
-        urls = {row["url"] for row in matches}
-        if len(urls) != 1:
-            emit("schedule_cover_match_ambiguous", title=item.get("title", ""),
-                 shows=[row["title"] for row in matches])
-            continue
-        show = matches[0]
-        if show["slug"] not in needed:
-            needed[show["slug"]] = {
-                **show,
-                "episode_page": item.get("page") or item.get("guid"),
-                "episode_title": item.get("title", ""),
-            }
-
-    covers = {}
+    month_re = re.compile(r"\\b(January|February|March|April|May|June|July|August|September|October|November|December)\\s*,?\\s*(20\\d{2})\\b", re.I)
+    catalog = {}
+    matches = {}
     dimension_cache = {}
-    debug_keys = {
-        "truetotrance", "ontheemotionsofhappiness", "roundtrianglepodcast",
-        "octopustranceradio", "sunsets", "pharmacyradio",
-    }
-    for slug, show in needed.items():
-        source_page = show.get("episode_page") or show["url"]
+    seen_signatures = set()
+    seen_square_urls = set()
+    scanned_months = []
+
+    def snapshot():
+        return browser_page.evaluate("""() => {
+          const visible = e => {
+            if (!e) return false;
+            const s = getComputedStyle(e);
+            return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length > 0;
+          };
+          const clean = (v, n=260) => String(v || '').replace(/\\s+/g, ' ').trim().slice(0,n);
+          const cls = e => typeof e.className === 'string' ? e.className : (e.getAttribute('class') || '');
+          const headings = [...document.querySelectorAll('h1,h2,h3,h4,[aria-live],[class*=month i],[class*=calendar-title i]')]
+            .filter(visible).map(e => clean(e.innerText || e.textContent,100)).filter(Boolean);
+          const controls = [...document.querySelectorAll('button,a,[role=button],input[type=button]')]
+            .filter(visible).map((e,index) => ({
+              index, tag:e.tagName.toLowerCase(), text:clean(e.innerText || e.value || e.textContent,50),
+              aria:clean(e.getAttribute('aria-label'),100), title:clean(e.getAttribute('title'),100),
+              cls:clean(cls(e),160), href:e.href || '', disabled:Boolean(e.disabled || e.getAttribute('aria-disabled')==='true'),
+              parentClass:clean(cls(e.parentElement),120)
+            }));
+          const links = [...document.querySelectorAll('a[href]')].filter(visible).map(a => ({
+            text:clean(a.innerText || a.getAttribute('aria-label') || a.title,100),
+            title:clean(a.title || a.getAttribute('aria-label'),100), href:a.href || ''
+          }));
+          const images = [...document.images].filter(visible).map(img => {
+            const contexts=[];
+            let p=img.parentElement;
+            for(let i=0;p && i<5;i++,p=p.parentElement) {
+              const t=clean(p.innerText || p.textContent,260);
+              const ls=[...p.querySelectorAll('a[href]')].slice(0,6).map(a=>({
+                text:clean(a.innerText || a.getAttribute('aria-label') || a.title,100),
+                title:clean(a.title || a.getAttribute('aria-label'),100), href:a.href || ''
+              }));
+              contexts.push({text:t,cls:clean(cls(p),120),links:ls});
+            }
+            const sources=[];
+            for(const attr of ['currentSrc','src','data-src','data-lazy-src','data-original']) {
+              const v=attr==='currentSrc' ? img.currentSrc : img.getAttribute(attr);
+              if(v) sources.push(v);
+            }
+            for(const attr of ['srcset','data-srcset']) {
+              for(const part of (img.getAttribute(attr)||'').split(',')) {
+                const v=part.trim().split(/\\s+/)[0]; if(v) sources.push(v);
+              }
+            }
+            return {sources:[...new Set(sources)],alt:clean(img.alt,120),title:clean(img.title,120),
+              width:img.naturalWidth||img.width||0,height:img.naturalHeight||img.height||0,contexts};
+          });
+          return {url:location.href,title:clean(document.title,120),body:clean(document.body?.innerText,2500),
+            headings,controls,links,images};
+        }""")
+
+    def current_month(snap):
+        for value in snap.get("headings", []):
+            hit = month_re.search(value)
+            if hit:
+                return f"{hit.group(1).title()}, {hit.group(2)}"
+        hit = month_re.search(snap.get("body", ""))
+        return f"{hit.group(1).title()}, {hit.group(2)}" if hit else ""
+
+    def add_catalog_link(href, title, base_url):
+        slug = _schedule_slug(href, base_url)
+        title = (title or "").strip()
+        key = _compact_cover_label(title)
+        if slug and key and len(key) >= 5:
+            catalog[(slug,key)] = {"slug":slug,"title":title,"key":key,"url":href}
+
+    def next_control(snap):
+        ranked=[]
+        for row in snap.get("controls", []):
+            if row.get("disabled"):
+                continue
+            label=" ".join(str(row.get(k,"")) for k in ("aria","title","cls","text","href","parentClass")).lower()
+            if re.search(r"\\b(previous|prev|back|left)\\b",label):
+                continue
+            score=0
+            if re.search(r"\\b(next month|next|forward|following month)\\b",label):
+                score += 100
+            if re.search(r"fc-next|next-month|calendar-next|month-next",label):
+                score += 120
+            if row.get("text","").strip() in (">","›","»","❯","→","⟶"):
+                score += 12
+            if re.search(r"calendar|month|schedule|event|fc-",label):
+                score += 8
+            if row.get("href") and re.search(r"month|calendar|schedule|tribe-bar-date|[?&]m=",row["href"],re.I):
+                score += 10
+            if score:
+                ranked.append((score,row))
+        ranked.sort(key=lambda p:p[0],reverse=True)
+        if not ranked:
+            return None
+        if len(ranked)>1 and ranked[0][0]==ranked[1][0] and ranked[0][1]["index"]!=ranked[1][1]["index"]:
+            return None
+        return ranked[0][1]
+
+    max_months=18
+    for month_index in range(max_months):
         try:
-            detail = session.get(
-                source_page,
-                headers={**core.HEADERS, "Referer": SCHEDULE_URL},
-                timeout=30,
-            )
-            if detail.status_code >= 400:
-                emit("schedule_episode_page_unavailable", show=show["title"],
-                     page=safe_url(source_page), status=detail.status_code)
-                continue
-        except requests.RequestException as exc:
-            emit("schedule_episode_page_unavailable", show=show["title"],
-                 page=safe_url(source_page), error=type(exc).__name__)
-            continue
+            snap=snapshot()
+        except Exception as exc:
+            emit("schedule_calendar_snapshot_error",month_index=month_index,error=type(exc).__name__)
+            break
+        month=current_month(snap) or f"Month view {month_index+1}"
+        for link in snap.get("links",[]):
+            add_catalog_link(link.get("href",""),link.get("text") or link.get("title",""),snap.get("url") or SCHEDULE_URL)
+        signature=(month,tuple(sorted(src for im in snap.get("images",[]) for src in im.get("sources",[]) if src)))
+        if signature in seen_signatures:
+            emit("schedule_calendar_navigation_stopped",reason="repeated_month_content",month=month)
+            break
+        seen_signatures.add(signature)
+        scanned_months.append(month)
+        new_urls=set()
+        for im in snap.get("images",[]):
+            contexts=im.get("contexts",[])
+            labels=[im.get("alt",""),im.get("title","")]
+            for ctx in contexts:
+                if ctx.get("text") and len(ctx["text"])<=260 and len(ctx.get("links",[]))<=6:
+                    labels.append(ctx["text"])
+                for link in ctx.get("links",[]):
+                    labels.extend([link.get("text",""),link.get("title","")])
+                    if link.get("href"):
+                        labels.append(urlparse(link["href"]).path.rsplit("/",1)[-1])
+            norm_labels=[_compact_cover_label(v) for v in labels if v and len(_compact_cover_label(v))>=5]
+            for raw in im.get("sources",[]):
+                url=urljoin(snap.get("url") or SCHEDULE_URL,html.unescape(str(raw or "").strip()))
+                parsed=urlparse(url)
+                if parsed.scheme not in ("http","https") or not re.search(r"\\.(?:jpe?g|png|webp|avif|gif)$",parsed.path,re.I):
+                    continue
+                filename_key=_compact_cover_label(parsed.path.rsplit("/",1)[-1])
+                labels_for_match=norm_labels+([filename_key] if filename_key else [])
+                if not labels_for_match:
+                    continue
+                possible=[]
+                for entry in catalog.values():
+                    if entry["key"] and any(entry["key"] in label or (len(label)>=12 and label in entry["key"]) for label in labels_for_match):
+                        possible.append(entry)
+                direct=[]
+                for item in items:
+                    key=_compact_cover_label(item.get("title",""))
+                    if len(key)>=9 and any(key in label for label in labels_for_match):
+                        direct.append((key,item.get("title","")))
+                if not possible and not direct:
+                    continue
+                score=_square_variant_score(session,url,im.get("width",0),im.get("height",0),dimension_cache)
+                if score is None:
+                    continue
+                new_urls.add(url)
+                seen_square_urls.add(url)
+                for entry in possible:
+                    row={"title":entry["title"],"key":entry["key"],"slug":entry["slug"],
+                         "cover":url,"source":"schedule_calendar","month":month}
+                    matches[(row["key"],url)]=row
+                for key,title in direct:
+                    row={"title":title,"key":key,"slug":"","cover":url,
+                         "source":"schedule_calendar_episode","month":month}
+                    matches[(key,url)]=row
 
-        detail_soup = BeautifulSoup(detail.text, "html.parser")
-        candidates = []
-        for selector in (
-            'meta[property="og:image"]',
-            'meta[property="og:image:secure_url"]',
-            'meta[name="twitter:image"]',
-            'meta[name="twitter:image:src"]',
-            'link[rel="image_src"]',
-        ):
-            node = detail_soup.select_one(selector)
-            if node:
-                raw = node.get("content") or node.get("href") or ""
-                if raw:
-                    candidates.append((
-                        raw, node.get("alt", ""), node.get("title", ""), 0, 0, "meta"
-                    ))
+        emit("schedule_calendar_month_scanned",month=month,
+             visible_images=len(snap.get("images",[])),new_square_urls=len(new_urls),
+             unique_square_urls=len(seen_square_urls),catalog_entries=len(catalog),
+             url=safe_url(snap.get("url") or SCHEDULE_URL))
+        if month_index+1>=max_months:
+            break
+        nxt=next_control(snap)
+        if not nxt:
+            emit("schedule_calendar_navigation_stopped",reason="next_month_control_not_found",
+                 month=month,months_scanned=len(scanned_months),
+                 controls=[{"text":r.get("text"),"aria":r.get("aria"),"title":r.get("title"),
+                            "class":r.get("cls"),"href":r.get("href")} for r in snap.get("controls",[]) if
+                           re.search(r"next|month|calendar|›|»|→",str(r).lower())][:20])
+            break
+        old_month,old_url=month,snap.get("url","")
+        try:
+            browser_page.evaluate("""index => {
+              const visible=e=>{const s=getComputedStyle(e);return s.display!=='none'&&s.visibility!=='hidden'&&e.getClientRects().length>0};
+              const all=[...document.querySelectorAll('button,a,[role=button],input[type=button]')].filter(visible);
+              if(!all[index]) return false;
+              all[index].click(); return true;
+            }""",nxt["index"])
+            browser_page.wait_for_timeout(800)
+            advanced=None
+            for _ in range(3):
+                advanced=snapshot()
+                new_month=current_month(advanced)
+                if (new_month and new_month!=old_month) or advanced.get("url")!=old_url:
+                    break
+                browser_page.wait_for_timeout(600)
+            new_month=current_month(advanced or {})
+            if not advanced or ((new_month==old_month or not new_month) and advanced.get("url")==old_url):
+                emit("schedule_calendar_navigation_stopped",reason="month_did_not_change",month=old_month,control=nxt)
+                break
+        except Exception as exc:
+            emit("schedule_calendar_navigation_error",month=old_month,error=type(exc).__name__)
+            break
 
-        for node in detail_soup.select("img, source, [style]"):
-            alt = node.get("alt", "") or ""
-            title_attr = node.get("title", "") or ""
-            parent_link = node.find_parent("a", href=True)
-            parent_label = ""
-            if parent_link is not None:
-                parent_label = " ".join((
-                    parent_link.get_text(" ", strip=True),
-                    parent_link.get("title", "") or "",
-                    parent_link.get("aria-label", "") or "",
-                ))
-            for raw in _image_source_urls(node):
-                candidates.append((
-                    raw, alt, title_attr + " " + parent_label,
-                    node.get("width", 0), node.get("height", 0), "html"
-                ))
+    result=list(matches.values())
+    emit("schedule_calendar_cover_index_complete",months_scanned=len(scanned_months),
+         months=scanned_months,unique_square_urls=len(seen_square_urls),
+         cover_associations=len(result),catalog_entries=len(catalog),
+         sample=[{"title":r["title"],"cover":safe_url(r["cover"]),"source":r["source"],"month":r["month"]} for r in result[:12]])
+    return {f"{row['key']}|{row['cover']}":row for row in result}
 
-        best = None
-        diagnostic = []
-        seen_urls = set()
-        for raw, alt, title_attr, width, height, source_kind in candidates:
-            url = urljoin(detail.url, html.unescape(str(raw or "").strip()))
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                continue
-            if not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
-                continue
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            filename_key = _compact_cover_label(parsed.path.rsplit("/", 1)[-1])
-            identity_match = (
-                show["key"] in _compact_cover_label(alt)
-                or show["key"] in _compact_cover_label(title_attr)
-                or bool(show["key"] and show["key"] in filename_key)
-            )
-            if not identity_match:
-                continue
-
-            dims = _fetch_image_dimensions(session, url, dimension_cache)
-            score = _square_variant_score(session, url, width, height, dimension_cache)
-            diagnostic.append({
-                "url": safe_url(url),
-                "source": source_kind,
-                "alt": str(alt)[:80],
-                "title": str(title_attr)[:100],
-                "dimensions": list(dims) if dims else None,
-                "score": score,
-            })
-            if score is None:
-                continue
-            candidate_score = score + (1000000 if (alt or title_attr) else 100000)
-            if best is None or candidate_score > best["score"]:
-                best = {"url": url, "score": candidate_score, "dimensions": dims}
-
-        if best:
-            covers[slug] = {**show, "cover": best["url"]}
-            emit("schedule_square_cover_found", show=show["title"],
-                 dimensions=best.get("dimensions"), cover=safe_url(best["url"]))
-        else:
-            emit("schedule_square_cover_not_found", show=show["title"],
-                 page=safe_url(source_page))
-            if _compact_cover_label(show["title"]) in debug_keys:
-                emit("square_cover_debug_candidates", show=show["title"],
-                     candidates=diagnostic[:12])
-
-        if PAUSE:
-            time.sleep(PAUSE)
-
-    emit("schedule_cover_index_complete",
-         schedule_shows=len(entries),
-         matched_shows=len(needed),
-         square_covers_found=len(covers))
-    return covers
 
 
 def _match_schedule_cover(episode_title, schedule_covers):
-    """Match the longest unique show-name prefix; return None for uncertain matches."""
+    """Use the most specific schedule-calendar title; reject conflicting cover URLs."""
     episode_key = _compact_cover_label(episode_title)
-    matches = [
-        row for row in schedule_covers.values()
-        if row.get("key") and episode_key.startswith(row["key"])
-    ]
+    matches = [row for row in schedule_covers.values()
+               if row.get("key") and episode_key.startswith(row["key"])]
     if not matches:
         return None
     longest = max(len(row["key"]) for row in matches)
     matches = [row for row in matches if len(row["key"]) == longest]
-    cover_urls = {row["cover"] for row in matches}
-    if len(cover_urls) != 1:
+    if len({row["cover"] for row in matches}) != 1:
         return None
+    matches.sort(key=lambda row: row.get("source") == "schedule_calendar_episode", reverse=True)
     return matches[0]
+
 
 
 def _schedule_image_is_live(session, url, cache):
@@ -1100,7 +1139,7 @@ def main():
                 raise RuntimeError(
                     f"Only {len(result)} episodes yielded direct MP3 URLs from actual Download-button clicks; need {TARGET_ITEMS}.")
             result.sort(key=lambda item: item["date"], reverse=True)
-            apply_schedule_covers(result, session)
+            apply_schedule_covers(result, session, page)
             write_feed(result)
             validate_feed(result)
             emit("test_feed_written", file=str(OUT), episodes=len(result),
