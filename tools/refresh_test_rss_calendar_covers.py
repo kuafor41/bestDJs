@@ -21,12 +21,12 @@ sys.path.insert(0, str(ROOT / "tools"))
 import build_test_rss as rss
 
 FEED_PATH = ROOT / "public" / "test-rss.xml"
-ITEM_RE = re.compile(r"<item>[\\s\\S]*?</item>")
-IMAGE_RE = re.compile(r'<itunes:image\\b[^>]*?href="([^"]*)"[^>]*/>')
-TITLE_RE = re.compile(r"<title>([\\s\\S]*?)</title>")
-LINK_RE = re.compile(r"<link>([\\s\\S]*?)</link>")
-ENCLOSURE_RE = re.compile(r"<enclosure\\b")
-MONTH_RE = re.compile(r"\\b(January|February|March|April|May|June|July|August|September|October|November|December)\\s*,?\\s*(20\\d{2})\\b", re.I)
+ITEM_RE = re.compile(r"<item>[\s\S]*?</item>")
+IMAGE_RE = re.compile(r'<itunes:image\b[^>]*?href="([^"]*)"[^>]*/>')
+TITLE_RE = re.compile(r"<title>([\s\S]*?)</title>")
+LINK_RE = re.compile(r"<link>([\s\S]*?)</link>")
+ENCLOSURE_RE = re.compile(r"<enclosure\b")
+MONTH_RE = re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s*,?\s*(20\d{2})\b", re.I)
 
 
 def decode_element_text(raw: str) -> str:
@@ -72,10 +72,10 @@ def next_month_control(snapshot):
         label = " ".join(str(row.get(k, "")) for k in (
             "aria", "title", "cls", "text", "href", "parentClass"
         )).lower()
-        if re.search(r"\\b(previous|prev|back|left)\\b", label):
+        if re.search(r"\b(previous|prev|back|left)\b", label):
             continue
         score = 0
-        if re.search(r"\\b(next month|next|forward|following month)\\b", label):
+        if re.search(r"\b(next month|next|forward|following month)\b", label):
             score += 100
         if re.search(r"fc-next|next-month|calendar-next|month-next", label):
             score += 120
@@ -165,7 +165,7 @@ def discover_calendar_covers(session, items, page):
             for raw in img.get("sources", []):
                 url = urljoin(snap.get("url") or rss.SCHEDULE_URL, html.unescape(str(raw or "").strip()))
                 parsed = urlparse(url)
-                if parsed.scheme not in ("http", "https") or not re.search(r"\\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
+                if parsed.scheme not in ("http", "https") or not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
                     continue
                 filename_key = rss._compact_cover_label(parsed.path.rsplit("/", 1)[-1])
                 match_labels = normalized + ([filename_key] if filename_key else [])
@@ -300,7 +300,7 @@ def replace_cover_tags(xml_text: str, items, blocks):
                 enclosure = ENCLOSURE_RE.search(block)
                 if not enclosure:
                     raise RuntimeError(f"Cannot add cover tag: missing enclosure for {items[index]['title']}.")
-                block = block[:enclosure.start()] + tag + "\\n" + block[enclosure.start():]
+                block = block[:enclosure.start()] + tag + "\n" + block[enclosure.start():]
             changed += 1
         output.append(block)
         cursor = match.end()
@@ -344,7 +344,7 @@ def main():
         return
 
     updated = re.sub(
-        r"<lastBuildDate>[\\s\\S]*?</lastBuildDate>",
+        r"<lastBuildDate>[\s\S]*?</lastBuildDate>",
         f"<lastBuildDate>{format_datetime(datetime.now(timezone.utc), usegmt=True)}</lastBuildDate>",
         updated, count=1,
     )
