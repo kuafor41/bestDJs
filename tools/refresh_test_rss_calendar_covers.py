@@ -56,7 +56,7 @@ def extract_items(xml_text: str):
 
 
 def schedule_snapshot(page):
-    """Capture rendered month headings, navigation controls, and image context."""
+    """Capture rendered headings, controls, image tags, CSS backgrounds, and iframe metadata."""
     return page.evaluate("""() => {
       const visible = e => {
         if (!e) return false;
@@ -70,6 +70,23 @@ def schedule_snapshot(page):
         .split(String.fromCharCode(9)).join(' ')
         .trim().slice(0, n);
       const cls = e => typeof e.className === 'string' ? e.className : (e.getAttribute('class') || '');
+      const contextsFor = el => {
+        const contexts = [];
+        let p = el.parentElement;
+        for (let depth = 0; p && depth < 5; depth++, p = p.parentElement) {
+          const ls = [...p.querySelectorAll('a[href]')].slice(0, 6).map(a => ({
+            text: clean(a.innerText || a.getAttribute('aria-label') || a.title, 100),
+            title: clean(a.title || a.getAttribute('aria-label'), 100),
+            href: a.href || ''
+          }));
+          contexts.push({
+            text: clean(p.innerText || p.textContent, 260),
+            cls: clean(cls(p), 120),
+            links: ls
+          });
+        }
+        return contexts;
+      };
       const headings = [...document.querySelectorAll("h1,h2,h3,h4,[aria-live],[class*='month' i],[class*='calendar-title' i]")]
         .filter(visible).map(e => clean(e.innerText || e.textContent, 100)).filter(Boolean);
       const controls = [...document.querySelectorAll("button,a,[role='button'],input[type='button']")]
@@ -90,20 +107,6 @@ def schedule_snapshot(page):
       const images = [...document.images].filter(img => visible(img) &&
         (img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src')))
         .map(img => {
-          const contexts = [];
-          let p = img.parentElement;
-          for (let depth = 0; p && depth < 5; depth++, p = p.parentElement) {
-            const ls = [...p.querySelectorAll('a[href]')].slice(0, 6).map(a => ({
-              text: clean(a.innerText || a.getAttribute('aria-label') || a.title, 100),
-              title: clean(a.title || a.getAttribute('aria-label'), 100),
-              href: a.href || ''
-            }));
-            contexts.push({
-              text: clean(p.innerText || p.textContent, 260),
-              cls: clean(cls(p), 120),
-              links: ls
-            });
-          }
           const sources = [];
           for (const attr of ['currentSrc','src','data-src','data-lazy-src','data-original']) {
             const v = attr === 'currentSrc' ? img.currentSrc : img.getAttribute(attr);
@@ -121,14 +124,37 @@ def schedule_snapshot(page):
             alt: clean(img.alt, 120), title: clean(img.title, 120),
             width: img.naturalWidth || img.width || 0,
             height: img.naturalHeight || img.height || 0,
-            contexts
+            contexts: contextsFor(img)
           };
         });
+      const backgrounds = [...document.querySelectorAll('*')].filter(visible).map(el => {
+        const bg = window.getComputedStyle(el).backgroundImage || '';
+        if (!bg || bg === 'none' || !bg.includes('url(')) return null;
+        const sources = [];
+        for (const piece of bg.split('url(').slice(1)) {
+          const value = piece.split(')')[0].replaceAll('"', '').replaceAll("'", '').trim();
+          if (value) sources.push(value);
+        }
+        if (!sources.length) return null;
+        return {
+          sources: [...new Set(sources)],
+          alt: clean(el.getAttribute('aria-label') || el.getAttribute('alt'), 120),
+          title: clean(el.getAttribute('title'), 120),
+          width: el.clientWidth || 0,
+          height: el.clientHeight || 0,
+          cls: clean(cls(el), 120),
+          contexts: contextsFor(el)
+        };
+      }).filter(Boolean);
+      const iframes = [...document.querySelectorAll('iframe')].filter(visible).map(el => ({
+        src: el.src || '', title: clean(el.title, 120),
+        cls: clean(cls(el), 120), width: el.clientWidth || 0, height: el.clientHeight || 0
+      }));
       return {
         url: location.href,
         title: clean(document.title, 120),
         body: clean(document.body ? document.body.innerText : '', 10000),
-        headings, controls, links, images
+        headings, controls, links, images, backgrounds, iframes
       };
     }""");
 
@@ -208,6 +234,26 @@ def discover_calendar_covers(session, items, page):
     for month_index in range(max_months):
         try:
             snap = schedule_snapshot(page)
+            # The calendar content may be embedded separately from the page header/footer.
+            for frame in page.frames[1:]:
+                try:
+                    frame_snap = schedule_snapshot(frame)
+                    if frame_snap.get("images") or frame_snap.get("backgrounds") or frame_snap.get("headings"):
+                        rss.emit("schedule_calendar_frame_seen",
+                                 frame=rss.safe_url(frame.url),
+                                 month=current_month(frame_snap),
+                                 visible_images=len(frame_snap.get("images", [])),
+                                 visible_backgrounds=len(frame_snap.get("backgrounds", [])),
+                                 headings=frame_snap.get("headings", [])[:8],
+                                 body_excerpt=frame_snap.get("body", "")[:180])
+                        for record in frame_snap.get("images", []) + frame_snap.get("backgrounds", []):
+                            record["base_url"] = frame_snap.get("url") or frame.url
+                        snap.setdefault("images", []).extend(frame_snap.get("images", []))
+                        snap.setdefault("backgrounds", []).extend(frame_snap.get("backgrounds", []))
+                        snap.setdefault("links", []).extend(frame_snap.get("links", []))
+                except Exception as frame_exc:
+                    rss.emit("schedule_calendar_frame_error", frame=rss.safe_url(frame.url),
+                             error=type(frame_exc).__name__)
         except Exception as exc:
             rss.emit("schedule_calendar_snapshot_error", month_index=month_index, error=type(exc).__name__)
             break
@@ -227,7 +273,8 @@ def discover_calendar_covers(session, items, page):
         scanned_months.append(month)
 
         new_urls = set()
-        for img in snap.get("images", []):
+        image_records = snap.get("images", []) + snap.get("backgrounds", [])
+        for img in image_records:
             labels = [img.get("alt", ""), img.get("title", "")]
             for context in img.get("contexts", []):
                 text = context.get("text", "")
@@ -241,7 +288,7 @@ def discover_calendar_covers(session, items, page):
                           if value and len(rss._compact_cover_label(value)) >= 5]
 
             for raw in img.get("sources", []):
-                url = urljoin(snap.get("url") or rss.SCHEDULE_URL, html.unescape(str(raw or "").strip()))
+                url = urljoin(img.get("base_url") or snap.get("url") or rss.SCHEDULE_URL, html.unescape(str(raw or "").strip()))
                 parsed = urlparse(url)
                 if parsed.scheme not in ("http", "https") or not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
                     continue
@@ -305,9 +352,23 @@ def discover_calendar_covers(session, items, page):
                     "pixel_size": [img.get("width", 0), img.get("height", 0)],
                     "contexts": sample_contexts
                 })
+            for img in snap.get("backgrounds", [])[:10]:
+                sample_sources = [rss.safe_url(urljoin(img.get("base_url") or snap.get("url") or rss.SCHEDULE_URL, src))
+                                  for src in img.get("sources", [])[:4]]
+                image_samples.append({
+                    "kind": "css-background",
+                    "sources": sample_sources,
+                    "alt": img.get("alt", ""),
+                    "title": img.get("title", ""),
+                    "pixel_size": [img.get("width", 0), img.get("height", 0)],
+                    "contexts": [{"class": ctx.get("cls", ""), "text": (ctx.get("text", "") or "")[:180],
+                                  "links": [{"text": link.get("text", ""), "href": rss.safe_url(link.get("href", "")) if link.get("href") else None}
+                                            for link in ctx.get("links", [])[:4]]}
+                                 for ctx in img.get("contexts", [])[:3]]
+                })
         rss.emit("schedule_calendar_month_scanned", month=month,
-                 visible_images=len(snap.get("images", [])),
-                 new_square_urls=len(new_urls), unique_square_urls=len(seen_square_urls),
+                 visible_images=len(snap.get("images", [])), visible_backgrounds=len(snap.get("backgrounds", [])),
+                 iframes=len(snap.get("iframes", [])), new_square_urls=len(new_urls), unique_square_urls=len(seen_square_urls),
                  catalog_entries=len(catalog), url=rss.safe_url(snap.get("url") or rss.SCHEDULE_URL),
                  image_samples=image_samples)
 
