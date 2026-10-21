@@ -231,6 +231,26 @@ def previous_month_control(snapshot):
     return ranked[0][1]
 
 
+def archive_episode_title_keys():
+    """Return normalized episode titles from the production archive as a strict scope list."""
+    production_path = ROOT / "public" / "rss.xml"
+    if not production_path.exists():
+        raise RuntimeError("Cannot scope calendar covers: public/rss.xml is missing.")
+    root = ET.parse(production_path).getroot()
+    entries = root.findall("./channel/item")
+    keys = {
+        rss._compact_cover_label(entry.findtext("title") or "")
+        for entry in entries
+        if rss._compact_cover_label(entry.findtext("title") or "")
+    }
+    if not keys:
+        raise RuntimeError("Cannot scope calendar covers: production RSS has no episode titles.")
+    rss.emit("schedule_calendar_archive_scope",
+             archive_items=len(entries), distinct_episode_titles=len(keys),
+             production_rss_touched=False)
+    return keys
+
+
 def archive_history_month_count():
     """Derive the historical scan window from the untouched production RSS archive."""
     production_path = ROOT / "public" / "rss.xml"
@@ -277,6 +297,7 @@ def _discover_calendar_covers_direction(session, items, page, direction, max_mon
         rss.emit("schedule_calendar_unavailable", direction=direction, error=type(exc).__name__)
         return {}
 
+    archive_title_keys = archive_episode_title_keys()
     catalog = {}
     cover_rows = {}
     dimension_cache = {}
@@ -287,13 +308,17 @@ def _discover_calendar_covers_direction(session, items, page, direction, max_mon
     item_keys = [
         {"key": rss._compact_cover_label(item.get("title", "")), "title": item.get("title", "")}
         for item in items
+        if rss._compact_cover_label(item.get("title", "")) in archive_title_keys
     ]
 
     def add_link(href, title, base_url):
         slug = rss._schedule_slug(href, base_url)
         title = (title or "").strip()
         key = rss._compact_cover_label(title)
-        if slug and key and len(key) >= 5:
+        # Keep only calendar mixshows whose names prefix at least one episode
+        # in the production archive; unrelated site/calendar shows are ignored.
+        belongs_to_archive = bool(key) and any(episode_key.startswith(key) for episode_key in archive_title_keys)
+        if slug and key and len(key) >= 5 and belongs_to_archive:
             catalog[(slug, key)] = {"slug": slug, "title": title, "key": key, "url": href}
 
     def capture_snapshot():
@@ -382,15 +407,25 @@ def _discover_calendar_covers_direction(session, items, page, direction, max_mon
 
                 new_urls.add(url)
                 seen_square_urls.add(url)
+                def store_cover_row(row):
+                    # Backward traversal is newest-to-oldest. The first square
+                    # cover found for a show is therefore the archive's preferred
+                    # latest-known artwork; never let older variants replace it.
+                    if direction == "backward" and any(
+                        existing.get("key") == row["key"] for existing in cover_rows.values()
+                    ):
+                        return
+                    cover_rows[(row["key"], row["cover"])] = row
+
                 for entry in show_matches:
                     row = {"title": entry["title"], "key": entry["key"], "slug": entry["slug"],
                            "cover": url, "source": "schedule_calendar", "month": month}
-                    cover_rows[(row["key"], url)] = row
+                    store_cover_row(row)
                 for entry in episode_matches:
                     directly_matched_items.add(entry["title"])
                     row = {"title": entry["title"], "key": entry["key"], "slug": "",
                            "cover": url, "source": "schedule_calendar_episode", "month": month}
-                    cover_rows[(row["key"], url)] = row
+                    store_cover_row(row)
 
         rss.emit("schedule_calendar_month_scanned",
                  direction=direction, month=month, visible_images=len(snap.get("images", [])),
@@ -478,10 +513,15 @@ def discover_calendar_covers(session, items, page):
     backward = _discover_calendar_covers_direction(
         session, items, page, direction="backward", max_months=history_months
     )
-    # Keep both variants if a show's artwork changed over time. The matcher then
-    # chooses an exact episode-key match or safely rejects conflicting show-level art.
-    combined = dict(backward)
-    combined.update(forward)
+    # For each archive mixshow, use the first cover encountered during the
+    # newest-to-oldest scan. Only if no historical association exists do we use
+    # the first forward-scan association as a fallback.
+    selected_by_key = {}
+    for row in backward.values():
+        selected_by_key.setdefault(row["key"], row)
+    for row in forward.values():
+        selected_by_key.setdefault(row["key"], row)
+    combined = {f"{row['key']}|{row['cover']}": row for row in selected_by_key.values()}
     rows = list(combined.values())
     rss.emit("schedule_calendar_cover_index_complete",
              months_scanned_forward=18, months_requested_backward=history_months,
@@ -489,7 +529,9 @@ def discover_calendar_covers(session, items, page):
              unique_square_urls=len({row["cover"] for row in rows}),
              distinct_title_keys=len({row["key"] for row in rows}),
              catalog_entries=len({(row.get("slug", ""), row.get("key", "")) for row in rows}),
-             note="Historical and future schedule calendar views indexed; production RSS read-only.")
+             first_cover_per_archived_mixshow=True,
+             scope="mixshows represented in public/rss.xml only",
+             note="Newest-to-oldest historical first cover takes priority; production RSS read-only.")
     return combined
 
 def apply_calendar_covers(items, session, page):
