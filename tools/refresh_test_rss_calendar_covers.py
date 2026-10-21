@@ -542,13 +542,21 @@ def discover_calendar_covers(session, items, page):
     return combined
 
 
-# Repair only the four pages whose artwork is refreshed from the source page by
+# Repair only the reported pages whose artwork is refreshed from the source page by
 # podcast clients but is not reliably represented by the schedule calendar.
 SOURCE_PAGE_ARTWORK_KEYS = {
+    # Previously confirmed episode-page cover discrepancies.
     "tritonia544",
     "musicboxradio939",
     "visionradios06e41",
     "altituderadio203",
+    # Additional Podcast Addict artwork discrepancies reported for the 50-item test feed.
+    "roundtrianglepodcast108",
+    "ontheemotionsofhappiness194",
+    "truetotranceoctober2026",
+    "octopustranceradio158",
+    "sunsets612",
+    "pharmacyradio123",
 }
 
 
