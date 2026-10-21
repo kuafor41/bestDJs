@@ -56,4 +56,4 @@ jobs:
             if [ -d public/episode-artwork ]; then git add public/episode-artwork/; fi
             git commit -m "Refresh test RSS episode artwork"
             git push
-          fi          fi
+          fi
