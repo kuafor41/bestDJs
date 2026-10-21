@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
+from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -534,6 +535,286 @@ def discover_calendar_covers(session, items, page):
              note="Newest-to-oldest historical first cover takes priority; production RSS read-only.")
     return combined
 
+
+# Repair only the four pages whose artwork is refreshed from the source page by
+# podcast clients but is not reliably represented by the schedule calendar.
+SOURCE_PAGE_ARTWORK_KEYS = {
+    "tritonia544",
+    "musicboxradio939",
+    "visionradios06e41",
+    "altituderadio203",
+}
+
+
+def _production_archive_cover_index():
+    """Return known cover URLs for exact archived episodes; never infer from a different show."""
+    production_path = ROOT / "public" / "rss.xml"
+    if not production_path.exists():
+        return {"by_page": {}, "by_title": {}}
+    try:
+        root = ET.parse(production_path).getroot()
+    except (ET.ParseError, OSError) as exc:
+        rss.emit("episode_artwork_archive_read_error", error=type(exc).__name__)
+        return {"by_page": {}, "by_title": {}}
+
+    by_page, by_title = {}, {}
+    for entry in root.findall("./channel/item"):
+        title = (entry.findtext("title") or "").strip()
+        link = (entry.findtext("link") or "").strip()
+        cover = ""
+        for child in entry:
+            if child.tag.endswith("}image") and child.attrib.get("href"):
+                cover = child.attrib["href"].strip()
+                break
+        if not cover:
+            continue
+        title_key = rss._compact_cover_label(title)
+        page_key = urlparse(link).path.rstrip("/").lower()
+        row = {"title": title, "page": link, "cover": cover}
+        if page_key:
+            by_page[page_key] = row
+        if title_key and title_key not in by_title:
+            by_title[title_key] = row
+        elif title_key and by_title[title_key].get("cover") != cover:
+            # Duplicate title with conflicting artwork is ambiguous; do not use it.
+            by_title.pop(title_key, None)
+    return {"by_page": by_page, "by_title": by_title}
+
+
+def _supported_image_url(raw, base_url):
+    url = urljoin(base_url, html.unescape(str(raw or "").strip()))
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    if not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
+        return ""
+    return url
+
+
+def _source_page_artwork_candidate(session, item):
+    """Find artwork explicitly tied to the episode/show on its own page.
+
+    Prefer the primary linked image (or the episode-specific video thumbnail) over
+    a small schedule-card variant such as '*-600x600.webp'. No unrelated image is
+    accepted merely because it appears somewhere on the page.
+    """
+    page_url = (item.get("page") or "").strip()
+    title = (item.get("title") or "").strip()
+    if not page_url or not title:
+        return None
+
+    response = None
+    try:
+        response = session.get(
+            page_url,
+            headers={**rss.core.HEADERS, "Referer": rss.SCHEDULE_URL},
+            allow_redirects=True,
+            timeout=(15, 35),
+        )
+        if response.status_code < 200 or response.status_code >= 400:
+            rss.emit("episode_artwork_page_unavailable", title=title,
+                     status=response.status_code, page=rss.safe_url(page_url))
+            return None
+        soup = BeautifulSoup(response.text, "html.parser")
+        base_url = response.url or page_url
+    except (requests.RequestException, OSError, ValueError) as exc:
+        rss.emit("episode_artwork_page_error", title=title,
+                 page=rss.safe_url(page_url), error=type(exc).__name__)
+        return None
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    episode_key = rss._compact_cover_label(title)
+    show_name = re.sub(r"\s+\d{1,5}[a-z]?$", "", title, flags=re.I).strip()
+    show_key = rss._compact_cover_label(show_name) or episode_key
+    candidates = {}
+
+    def add(raw, score, source, evidence):
+        url = _supported_image_url(raw, base_url)
+        if not url:
+            return
+        score = int(score)
+        existing = candidates.get(url)
+        row = {"url": url, "score": score, "source": source, "evidence": evidence}
+        if existing is None or score > existing["score"]:
+            candidates[url] = row
+
+    def compact(value):
+        return rss._compact_cover_label(value)
+
+    # OpenGraph/Twitter image is useful only when its URL is show-specific, or
+    # the page's own title confirms that this is the exact requested episode.
+    meta_title = " ".join([
+        soup.title.get_text(" ", strip=True) if soup.title else "",
+        soup.select_one('meta[property="og:title"]')["content"]
+        if soup.select_one('meta[property="og:title"]') and soup.select_one('meta[property="og:title"]').get("content")
+        else "",
+    ])
+    meta_title_key = compact(meta_title)
+    for selector in (
+        'meta[property="og:image"]',
+        'meta[property="og:image:secure_url"]',
+        'meta[name="twitter:image"]',
+        'meta[name="twitter:image:src"]',
+    ):
+        node = soup.select_one(selector)
+        if not node or not node.get("content"):
+            continue
+        url = _supported_image_url(node.get("content"), base_url)
+        url_key = compact(urlparse(url).path.rsplit("/", 1)[-1]) if url else ""
+        if url and show_key and show_key in url_key:
+            add(url, 920, "episode_page_metadata", "show name in image URL")
+        elif url and episode_key and episode_key in meta_title_key:
+            add(url, 860, "episode_page_metadata", "exact episode in page metadata title")
+
+    # For TopDJMixes pages the prominent artwork is often an image wrapped in a
+    # link to its full-size original. Prefer that linked image over the smaller
+    # <img src> variant. It is the same primary page media a client can discover
+    # when it refreshes the linked episode page.
+    for node in soup.find_all("img"):
+        alt_title = " ".join([
+            node.get("alt", ""),
+            node.get("title", ""),
+            node.get("aria-label", ""),
+        ])
+        anchor = node.find_parent("a", href=True)
+        anchor_text = ""
+        anchor_href = ""
+        if anchor:
+            anchor_text = " ".join([
+                anchor.get("title", ""),
+                anchor.get("aria-label", ""),
+                anchor.get_text(" ", strip=True),
+            ])
+            anchor_href = urljoin(base_url, html.unescape(anchor.get("href", "").strip()))
+        labels_key = compact(" ".join([
+            alt_title,
+            anchor_text,
+            anchor_href,
+            urlparse(anchor_href).path.rsplit("/", 1)[-1] if anchor_href else "",
+        ]))
+        exact_episode_evidence = bool(episode_key and episode_key in labels_key)
+        show_evidence = bool(show_key and show_key in labels_key)
+
+        if anchor_href and show_evidence:
+            linked_image = _supported_image_url(anchor_href, base_url)
+            if linked_image:
+                add(linked_image, 1450, "episode_page_primary_linked_image",
+                    "image link title/filename matches mixshow")
+        elif anchor_href and exact_episode_evidence:
+            linked_image = _supported_image_url(anchor_href, base_url)
+            if linked_image:
+                add(linked_image, 1350, "episode_page_episode_linked_image",
+                    "image link identifies exact episode")
+
+        raw_sources = []
+        for attr in ("data-src", "data-lazy-src", "data-original", "src"):
+            if node.get(attr):
+                raw_sources.append(node.get(attr))
+        for attr in ("srcset", "data-srcset"):
+            raw = node.get(attr, "")
+            if raw:
+                for entry in raw.split(","):
+                    parts = entry.strip().split()
+                    if parts:
+                        raw_sources.append(parts[0])
+        for raw in raw_sources:
+            image_url = _supported_image_url(raw, base_url)
+            if not image_url:
+                continue
+            image_key = compact(urlparse(image_url).path.rsplit("/", 1)[-1])
+            if exact_episode_evidence:
+                add(image_url, 1300, "episode_specific_page_image",
+                    "image alt/title/link identifies exact episode")
+            elif show_key and show_key in image_key:
+                score = 790
+                if re.search(r"[-_]600x600\.", urlparse(image_url).path, re.I):
+                    score -= 350
+                elif not re.search(r"[-_]\d{2,5}x\d{2,5}\.", urlparse(image_url).path, re.I):
+                    score += 80
+                add(image_url, score, "episode_page_show_image",
+                    "show name in image URL")
+            elif show_evidence:
+                add(image_url, 700, "episode_page_labelled_image",
+                    "show name in image alt/title/link")
+
+    if not candidates:
+        rss.emit("episode_artwork_page_no_candidate", title=title,
+                 page=rss.safe_url(base_url), show_key=show_key)
+        return None
+
+    for candidate in sorted(candidates.values(), key=lambda row: row["score"], reverse=True):
+        if rss.core.cover_url_is_live(session, candidate["url"], referer=base_url):
+            rss.emit("episode_artwork_page_candidate_selected", title=title,
+                     source=candidate["source"], evidence=candidate["evidence"],
+                     score=candidate["score"], cover=rss.safe_url(candidate["url"]),
+                     candidate_count=len(candidates))
+            return candidate
+        rss.emit("episode_artwork_page_candidate_rejected", title=title,
+                 source=candidate["source"], evidence=candidate["evidence"],
+                 cover=rss.safe_url(candidate["url"]), reason="image URL not live")
+    return None
+
+
+def repair_known_episode_page_covers(items, session):
+    """Use source-page artwork for the four known cases, with exact archive fallback."""
+    archive = _production_archive_cover_index()
+    matched = replaced = kept = 0
+    for item in items:
+        title = (item.get("title") or "").strip()
+        title_key = rss._compact_cover_label(title)
+        if title_key not in SOURCE_PAGE_ARTWORK_KEYS:
+            continue
+        matched += 1
+        old_cover = item.get("cover") or ""
+        candidate = _source_page_artwork_candidate(session, item)
+        source = ""
+        new_cover = candidate["url"] if candidate else ""
+
+        if not new_cover:
+            page_key = urlparse(item.get("page") or "").path.rstrip("/").lower()
+            archived = archive["by_page"].get(page_key) or archive["by_title"].get(title_key)
+            if archived and archived.get("cover") and archived["cover"] != old_cover:
+                if rss.core.cover_url_is_live(session, archived["cover"], referer=item.get("page") or rss.SCHEDULE_URL):
+                    new_cover = archived["cover"]
+                    source = "exact_same_episode_production_archive"
+                    rss.emit("episode_artwork_archive_fallback_selected", title=title,
+                             archived_title=archived.get("title", ""),
+                             cover=rss.safe_url(new_cover))
+        elif candidate:
+            source = candidate["source"]
+
+        if not new_cover:
+            kept += 1
+            rss.emit("episode_artwork_repair_kept_existing", title=title,
+                     reason="no_live_page_artwork_or_exact_archive_cover",
+                     existing_cover=rss.safe_url(old_cover) if old_cover else None)
+            continue
+        if new_cover == old_cover:
+            kept += 1
+            rss.emit("episode_artwork_repair_kept_existing", title=title,
+                     reason="source_selected_same_url", source=source or (candidate or {}).get("source", ""),
+                     cover=rss.safe_url(old_cover))
+            continue
+
+        previous = old_cover
+        item["cover"] = new_cover
+        replaced += 1
+        rss.emit("episode_artwork_repair_applied", title=title,
+                 source=source or (candidate or {}).get("source", ""),
+                 previous_cover=rss.safe_url(previous) if previous else None,
+                 cover=rss.safe_url(new_cover))
+    result = {"targeted": matched, "replaced": replaced, "kept_existing": kept}
+    rss.emit("episode_artwork_repair_complete", **result,
+             scope=sorted(SOURCE_PAGE_ARTWORK_KEYS),
+             production_rss_touched=False)
+    return result
+
+
 def apply_calendar_covers(items, session, page):
     covers = discover_calendar_covers(session, items, page)
     if not covers:
@@ -638,6 +919,11 @@ def main():
             summary = apply_calendar_covers(items, session, page)
         finally:
             browser.close()
+
+    # These four items can expose their preferred media through the linked episode
+    # page rather than the schedule card; repair only those explicit cases.
+    page_summary = repair_known_episode_page_covers(items, session)
+    summary["episode_page_repair"] = page_summary
 
     updated, changed = replace_cover_tags(original, items, blocks)
     if changed == 0:
