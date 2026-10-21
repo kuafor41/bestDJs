@@ -102,6 +102,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add public/rss.xml public/bestdjs-cover.jpg data/retry-queue.csv data/update-report.csv data/show-inventory.csv data/success-report.csv
+          if [ -f data/episode-artwork-index.csv ]; then git add data/episode-artwork-index.csv; fi
+          if [ -d public/episode-artwork ]; then git add public/episode-artwork/; fi
           if git diff --cached --quiet; then
             echo "RSS and tracking files unchanged; no commit needed."
           else

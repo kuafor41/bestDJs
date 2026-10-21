@@ -745,6 +745,14 @@ RETRY_INITIAL_HOURS = 6
 RETRY_MAX_HOURS = 72
 ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 PODCAST_COVER_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"
+ARTWORK_DIR = Path("public/episode-artwork")
+ARTWORK_BASE_URL = "https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/episode-artwork"
+ARTWORK_INDEX_CSV = Path("data/episode-artwork-index.csv")
+ARTWORK_PROBE_PREFIX_BYTES = 65536
+ARTWORK_MAX_TAG_BYTES = 8 * 1024 * 1024
+ARTWORK_FAILURE_RETRY_HOURS = 24
+ARTWORK_INDEX_FIELDS = ["guid", "page", "title", "audio_url", "status", "cover_url",
+                        "image_sha256", "last_checked_utc", "detail"]
 COVER_URL_VALIDITY_CACHE = {}
 ET.register_namespace("itunes", ITUNES_NS)
 
@@ -1511,6 +1519,335 @@ def click_download_and_resolve_audio(page, context, session, item, PlaywrightTim
         return use_player_fallback("download_audio_invalid_or_temporary")
     return final_url, checked.get("length")
 
+def _syncsafe_integer(data: bytes):
+    if len(data) != 4 or any(value & 0x80 for value in data):
+        return None
+    return (data[0] << 21) | (data[1] << 14) | (data[2] << 7) | data[3]
+
+
+def _artwork_extension(image_bytes: bytes, mime: str) -> str:
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "webp"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if mime in ("image/jpeg", "image/jpg"):
+        return "jpg"
+    if mime == "image/png":
+        return "png"
+    if mime == "image/webp":
+        return "webp"
+    if mime == "image/gif":
+        return "gif"
+    return ""
+
+
+def _parse_apic_frame(frame_data: bytes):
+    if len(frame_data) < 5:
+        return None
+    encoding = frame_data[0]
+    mime_end = frame_data.find(b"\x00", 1)
+    if mime_end < 0 or mime_end + 1 >= len(frame_data):
+        return None
+    mime = frame_data[1:mime_end].decode("latin-1", errors="replace")
+    picture_type = frame_data[mime_end + 1]
+    description_start = mime_end + 2
+    if encoding in (1, 2):
+        image_start = -1
+        for pos in range(description_start, len(frame_data) - 1, 2):
+            if frame_data[pos:pos + 2] == b"\x00\x00":
+                image_start = pos + 2
+                break
+    else:
+        desc_end = frame_data.find(b"\x00", description_start)
+        image_start = desc_end + 1 if desc_end >= 0 else -1
+    if image_start < description_start or image_start >= len(frame_data):
+        return None
+    image_bytes = frame_data[image_start:]
+    if not _artwork_extension(image_bytes, mime):
+        return None
+    return picture_type, mime, image_bytes
+
+
+def extract_id3_front_cover(data: bytes):
+    """Return an ID3v2 front-cover frame without decoding or downloading the audio body."""
+    if len(data) < 10 or data[:3] != b"ID3":
+        return None, "no_id3v2_header"
+    version = data[3]
+    if version not in (2, 3, 4):
+        return None, f"unsupported_id3v2_version_{version}"
+    tag_size = _syncsafe_integer(data[6:10])
+    if tag_size is None:
+        return None, "invalid_id3_tag_size"
+    tag_end = 10 + tag_size
+    if tag_end > len(data):
+        return None, "id3_tag_larger_than_downloaded_range"
+    pos = 10
+    if data[5] & 0x40:
+        if version == 3:
+            if pos + 4 > tag_end:
+                return None, "truncated_extended_header"
+            pos += 4 + int.from_bytes(data[pos:pos + 4], "big")
+        elif version == 4:
+            if pos + 4 > tag_end:
+                return None, "truncated_extended_header"
+            extended_size = _syncsafe_integer(data[pos:pos + 4])
+            if extended_size is None:
+                return None, "invalid_extended_header"
+            pos += extended_size
+        else:
+            pos += 6
+    images = []
+    while pos < tag_end:
+        if version == 2:
+            if pos + 6 > tag_end:
+                break
+            frame_id = data[pos:pos + 3]
+            if frame_id == b"\x00\x00\x00":
+                break
+            frame_size = int.from_bytes(data[pos + 3:pos + 6], "big")
+            header_size = 6
+        else:
+            if pos + 10 > tag_end:
+                break
+            frame_id = data[pos:pos + 4]
+            if frame_id == b"\x00\x00\x00\x00":
+                break
+            frame_size = (_syncsafe_integer(data[pos + 4:pos + 8]) if version == 4
+                          else int.from_bytes(data[pos + 4:pos + 8], "big"))
+            if frame_size is None:
+                return None, "invalid_id3_frame_size"
+            header_size = 10
+        if frame_size <= 0 or pos + header_size + frame_size > tag_end:
+            break
+        frame_data = data[pos + header_size:pos + header_size + frame_size]
+        if ((version == 2 and frame_id == b"PIC")
+                or (version in (3, 4) and frame_id == b"APIC")):
+            if version == 2 and len(frame_data) >= 6:
+                fmt = frame_data[1:4].decode("latin-1", errors="replace").lower()
+                mime = {"jpg": "image/jpeg", "png": "image/png", "gif": "image/gif"}.get(fmt, f"image/{fmt}")
+                parsed = _parse_apic_frame(b"\x03" + mime.encode("latin-1") + b"\x00" + frame_data[4:])
+            else:
+                parsed = _parse_apic_frame(frame_data)
+            if parsed:
+                images.append(parsed)
+        pos += header_size + frame_size
+    if not images:
+        return None, "no_embedded_picture_frame"
+    images.sort(key=lambda value: (value[0] != 3, value[0]))
+    picture_type, mime, image_bytes = images[0]
+    return {"picture_type": picture_type, "mime": mime, "bytes": image_bytes}, "embedded_picture_found"
+
+
+def _request_mp3_prefix(session, item, byte_count):
+    """Request a bounded byte range at the start of an MP3; never download the whole file."""
+    response = None
+    try:
+        response = session.get(
+            item.get("audio", ""),
+            headers={**HEADERS, "Referer": item.get("page") or SHOWS_URL,
+                     "Range": f"bytes=0-{byte_count - 1}"},
+            allow_redirects=True, stream=True, timeout=(12, 25),
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        content_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+        if status not in (200, 206):
+            return None, f"http_{status}"
+        if not (content_type.startswith("audio/") or content_type in
+                ("application/octet-stream", "application/force-download", "") or
+                is_mp3(getattr(response, "url", item.get("audio", "")))):
+            return None, f"unexpected_content_type_{content_type or 'missing'}"
+        try:
+            data = response.raw.read(byte_count, decode_content=True)
+        except TypeError:
+            data = response.raw.read(byte_count)
+        return data, ""
+    except (requests.RequestException, OSError, ValueError, TypeError) as exc:
+        return None, f"request_{type(exc).__name__}"
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+
+def _extract_embedded_cover(session, item):
+    """Inspect just ID3 metadata and persist the front-cover image by content hash."""
+    audio_url = str(item.get("audio") or "").strip()
+    parsed_audio = urlparse(audio_url)
+    if parsed_audio.scheme != "https" or parsed_audio.hostname not in ("files.topdjmixes.com", "www.topdjmixes.com"):
+        return None, "unsupported_audio_host"
+    prefix, error = _request_mp3_prefix(session, item, ARTWORK_PROBE_PREFIX_BYTES)
+    if prefix is None:
+        return None, error or "mp3_prefix_unavailable"
+    if len(prefix) < 10 or prefix[:3] != b"ID3":
+        return None, "no_id3v2_header"
+    tag_size = _syncsafe_integer(prefix[6:10])
+    if tag_size is None:
+        return None, "invalid_id3_tag_size"
+    expected_size = 10 + tag_size
+    if expected_size > ARTWORK_MAX_TAG_BYTES:
+        return None, "id3_tag_exceeds_8mb_limit"
+    data = prefix
+    if expected_size > len(data):
+        data, error = _request_mp3_prefix(session, item, expected_size)
+        if data is None:
+            return None, error or "full_id3_tag_unavailable"
+        if len(data) < expected_size:
+            return None, "truncated_id3_tag"
+    artwork, reason = extract_id3_front_cover(data)
+    if not artwork:
+        return None, reason
+    image_bytes = artwork["bytes"]
+    extension = _artwork_extension(image_bytes, artwork["mime"])
+    if not extension or not image_bytes:
+        return None, "unsupported_or_empty_picture"
+    import hashlib
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
+    ARTWORK_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Reuse matching images created during the successful test work.
+    candidates = list(ARTWORK_DIR.glob(f"*-{image_hash[:12]}.{extension}"))
+    candidates.append(ARTWORK_DIR / f"{image_hash}.{extension}")
+    target = None
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() == image_hash:
+                target = candidate
+                break
+        except OSError:
+            continue
+    if target is None:
+        target = ARTWORK_DIR / f"{image_hash}.{extension}"
+        if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != image_hash:
+            target.write_bytes(image_bytes)
+    cover_url = f"{ARTWORK_BASE_URL}/{target.name}"
+    return {"url": cover_url, "sha256": image_hash, "bytes": len(image_bytes),
+            "picture_type": artwork["picture_type"]}, "embedded_picture_found"
+
+
+def read_episode_artwork_index():
+    if not ARTWORK_INDEX_CSV.exists():
+        return {}
+    rows = {}
+    with ARTWORK_INDEX_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            guid = canonical_url(row.get("guid", ""))
+            if guid:
+                row["guid"] = guid
+                rows[guid] = row
+    return rows
+
+
+def write_episode_artwork_index(rows):
+    ARTWORK_INDEX_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with ARTWORK_INDEX_CSV.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ARTWORK_INDEX_FIELDS)
+        writer.writeheader()
+        for guid in sorted(rows):
+            writer.writerow({field: rows[guid].get(field, "") for field in ARTWORK_INDEX_FIELDS})
+
+
+def _local_artwork_exists(url):
+    parsed = urlparse(str(url or ""))
+    prefix = "/kuafor41/bestDJs/main/public/episode-artwork/"
+    if parsed.netloc != "raw.githubusercontent.com" or not parsed.path.startswith(prefix):
+        return False
+    name = Path(parsed.path).name
+    return bool(name and ARTWORK_DIR.joinpath(name).is_file()
+                and ARTWORK_DIR.joinpath(name).stat().st_size > 0)
+
+
+def refresh_embedded_episode_artwork(items, session, now=None):
+    """Use exact MP3 ID3 artwork for the retained archive; cache unchanged probe outcomes."""
+    now = now or datetime.now(timezone.utc)
+    previous = read_episode_artwork_index()
+    index_rows = dict(previous)
+    stats = {
+        "episodes": len(items), "probed": 0, "embedded_found": 0, "covers_replaced": 0,
+        "cached_embedded": 0, "cached_no_artwork": 0, "recent_failures_skipped": 0,
+        "no_artwork": 0, "probe_failures": 0, "unsupported_large_tags": 0,
+    }
+    retry_after = timedelta(hours=ARTWORK_FAILURE_RETRY_HOURS)
+    for item in items:
+        guid = canonical_url(item.get("guid") or item.get("page") or "")
+        audio_url = str(item.get("audio") or "").strip()
+        if not guid or not audio_url:
+            continue
+        old_row = previous.get(guid, {})
+        same_audio = old_row.get("audio_url", "") == audio_url
+        old_status = old_row.get("status", "")
+        old_cover_url = old_row.get("cover_url", "")
+        checked_at = parse_datetime_value(old_row.get("last_checked_utc", ""))
+        if same_audio and old_status == "embedded" and old_cover_url and _local_artwork_exists(old_cover_url):
+            if item.get("cover") != old_cover_url:
+                item["cover"] = old_cover_url
+                stats["covers_replaced"] += 1
+            stats["cached_embedded"] += 1
+            index_rows[guid] = old_row
+            continue
+        if same_audio and old_status == "no_embedded_artwork":
+            stats["cached_no_artwork"] += 1
+            index_rows[guid] = old_row
+            continue
+        if same_audio and old_status == "tag_too_large":
+            stats["unsupported_large_tags"] += 1
+            index_rows[guid] = old_row
+            continue
+        if (same_audio and old_status == "probe_failed" and checked_at
+                and now - checked_at < retry_after):
+            stats["recent_failures_skipped"] += 1
+            index_rows[guid] = old_row
+            continue
+
+        stats["probed"] += 1
+        old_cover = item.get("cover") or ""
+        result, detail = _extract_embedded_cover(session, item)
+        row = {
+            "guid": guid, "page": item.get("page") or "", "title": item.get("title") or "",
+            "audio_url": audio_url, "status": "",
+            "cover_url": "", "image_sha256": "",
+            "last_checked_utc": now.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+            "detail": detail,
+        }
+        if result:
+            row.update(status="embedded", cover_url=result["url"], image_sha256=result["sha256"])
+            if old_cover != result["url"]:
+                item["cover"] = result["url"]
+                stats["covers_replaced"] += 1
+            else:
+                item["cover"] = result["url"]
+            stats["embedded_found"] += 1
+            log("episode_artwork_embedded_cover_applied", title=item.get("title", ""),
+                page=safe_url(item.get("page", "")), cover=safe_url(result["url"]),
+                image_sha256=result["sha256"], image_bytes=result["bytes"],
+                picture_type=result["picture_type"], previous_cover=safe_url(old_cover))
+        elif detail in ("no_id3v2_header", "no_embedded_picture_frame"):
+            row.update(status="no_embedded_artwork")
+            stats["no_artwork"] += 1
+        elif detail == "id3_tag_exceeds_8mb_limit":
+            row.update(status="tag_too_large")
+            stats["unsupported_large_tags"] += 1
+        else:
+            row.update(status="probe_failed")
+            stats["probe_failures"] += 1
+            log("episode_artwork_probe_failed", title=item.get("title", ""),
+                page=safe_url(item.get("page", "")), reason=detail)
+        index_rows[guid] = row
+    write_episode_artwork_index(index_rows)
+    log("episode_artwork_archive_sweep_complete", **stats,
+        artwork_files=sum(1 for path in ARTWORK_DIR.glob("*") if path.is_file()) if ARTWORK_DIR.exists() else 0,
+        artwork_index_items=len(index_rows),
+        source_audio_urls_changed=False,
+        existing_covers_kept_when_embedded_art_is_absent=True)
+    return stats
+
+
 def read_existing_feed():
     if not OUT.exists() or OUT.stat().st_size == 0:
         return []
@@ -2250,6 +2587,8 @@ def main():
 
             apply_series_metadata(final_items, catalog_rows, posts)
             canonicalize_series_covers(final_items)
+            # MP3-embedded front covers override general show thumbnails across the retained archive.
+            artwork_stats = refresh_embedded_episode_artwork(final_items, session, now)
             # Do not block a healthy RSS update when an old source episode disappears.
             # Record it for retry on every run; successful audio recovery removes it from the queue.
             queue_missing_published_items(previous_published_items, final_items, queue, now)
@@ -2267,7 +2606,7 @@ def main():
                 recovered_count=recovered_count,
                 retry_waiting=sum(1 for row in queue.values() if row.get("status") == "waiting"),
                 retry_expired=sum(1 for row in queue.values() if row.get("status") == "expired"),
-                source_failures=source_failures, rss_file=str(OUT))
+                source_failures=source_failures, episode_artwork=artwork_stats, rss_file=str(OUT))
         finally:
             browser.close()
 

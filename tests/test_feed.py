@@ -262,5 +262,26 @@ class FeedTests(unittest.TestCase):
         self.assertIn("First track", description)
         self.assertIn("Second track", description)
 
+    def test_extract_id3_front_cover_from_apic_frame(self):
+        import struct
+        image = b"\xff\xd8\xff" + b"test-jpeg-data" + b"\xff\xd9"
+        frame_data = b"\x00image/jpeg\x00\x03\x00" + image
+        frame = b"APIC" + struct.pack(">I", len(frame_data)) + b"\x00\x00" + frame_data
+        tag_size = len(frame)
+        syncsafe = bytes(((tag_size >> 21) & 0x7F, (tag_size >> 14) & 0x7F,
+                          (tag_size >> 7) & 0x7F, tag_size & 0x7F))
+        tag = b"ID3" + bytes((3, 0, 0)) + syncsafe + frame
+        artwork, reason = build_feed.extract_id3_front_cover(tag)
+        self.assertEqual(reason, "embedded_picture_found")
+        self.assertIsNotNone(artwork)
+        self.assertEqual(artwork["picture_type"], 3)
+        self.assertEqual(artwork["mime"], "image/jpeg")
+        self.assertEqual(artwork["bytes"], image)
+
+    def test_extract_id3_cover_requires_real_id3_header(self):
+        artwork, reason = build_feed.extract_id3_front_cover(b"not an mp3 tag")
+        self.assertIsNone(artwork)
+        self.assertEqual(reason, "no_id3v2_header")
+
 if __name__ == "__main__":
     unittest.main()
