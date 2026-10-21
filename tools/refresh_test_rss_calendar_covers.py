@@ -281,10 +281,35 @@ def discover_calendar_covers(session, items, page):
                            "cover": url, "source": "schedule_calendar_episode", "month": month}
                     cover_rows[(row["key"], url)] = row
 
+        image_samples = []
+        if month_index == 0:
+            for img in snap.get("images", [])[:10]:
+                sample_sources = []
+                for src in img.get("sources", [])[:4]:
+                    u = urljoin(snap.get("url") or rss.SCHEDULE_URL, str(src or ""))
+                    sample_sources.append(rss.safe_url(u))
+                sample_contexts = []
+                for ctx in img.get("contexts", [])[:3]:
+                    sample_contexts.append({
+                        "class": ctx.get("cls", ""),
+                        "text": (ctx.get("text", "") or "")[:180],
+                        "links": [{
+                            "text": link.get("text", ""),
+                            "href": rss.safe_url(link.get("href", "")) if link.get("href") else None
+                        } for link in ctx.get("links", [])[:4]]
+                    })
+                image_samples.append({
+                    "sources": sample_sources,
+                    "alt": img.get("alt", ""),
+                    "title": img.get("title", ""),
+                    "pixel_size": [img.get("width", 0), img.get("height", 0)],
+                    "contexts": sample_contexts
+                })
         rss.emit("schedule_calendar_month_scanned", month=month,
                  visible_images=len(snap.get("images", [])),
                  new_square_urls=len(new_urls), unique_square_urls=len(seen_square_urls),
-                 catalog_entries=len(catalog), url=rss.safe_url(snap.get("url") or rss.SCHEDULE_URL))
+                 catalog_entries=len(catalog), url=rss.safe_url(snap.get("url") or rss.SCHEDULE_URL),
+                 image_samples=image_samples)
 
         nxt = next_month_control(snap)
         if not nxt:
