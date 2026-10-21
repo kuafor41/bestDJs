@@ -1,0 +1,58 @@
+name: Refresh test RSS covers from schedule calendar
+on:
+  push:
+    paths:
+      - 'tools/refresh_test_rss_calendar_covers.py'
+      - '.github/workflows/refresh-test-rss-calendar-covers.yml'
+      - 'tools/build_test_rss.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: bestdjs-test-calendar-covers
+  cancel-in-progress: false
+jobs:
+  refresh-test-covers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install browser dependencies
+        run: |
+          python -m pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+      - name: Refresh only test RSS calendar covers
+        run: python tools/refresh_test_rss_calendar_covers.py
+      - name: Validate test RSS structure and preserve audio
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("public/test-rss.xml").getroot()
+          items = root.findall("./channel/item")
+          assert len(items) == 50, f"Expected 50 test episodes, got {len(items)}"
+          for item in items:
+              assert item.findtext("title")
+              assert item.findtext("description")
+              enclosure = item.find("enclosure")
+              assert enclosure is not None and enclosure.get("type") == "audio/mpeg"
+              assert enclosure.get("url", "").lower().split("?", 1)[0].endswith(".mp3")
+          print("Test RSS structure passed: 50 items; audio and descriptions retained")
+          PY
+      - name: Commit test RSS changes only
+        run: |
+          if [ -z "$(git status --porcelain -- public/test-rss.xml)" ]; then
+            echo "No test-RSS cover changes to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add public/test-rss.xml
+            git commit -m "Refresh test RSS covers from schedule calendar"
+            git push
+          fi
