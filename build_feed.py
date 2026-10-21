@@ -2443,6 +2443,31 @@ def write_inventory(show_rows, now, all_items=None, discovered_posts=None):
 
 
 
+def sort_report_csv_newest_first(path, fields):
+    """Keep report history intact while storing newest run first by Turkish local date/time."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        existing_fields = reader.fieldnames or fields
+        rows = list(reader)
+    def sort_key(row):
+        try:
+            local_dt = datetime.strptime(
+                f"{row.get('date_tr', '')} {row.get('time_tr', '')}",
+                "%d.%m.%Y %H:%M:%S",
+            )
+            return local_dt
+        except ValueError:
+            # Keep malformed/legacy rows at the bottom without dropping any history.
+            return datetime.min
+    rows.sort(key=sort_key, reverse=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=existing_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def append_update_report(now, rebuild, source_posts, show_count, selected_count,
                          added_items, retry_attempted, recovered_count, queue, failures):
     REPORT_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -2466,6 +2491,7 @@ def append_update_report(now, rebuild, source_posts, show_count, selected_count,
         if new_file:
             writer.writeheader()
         writer.writerow(row)
+    sort_report_csv_newest_first(REPORT_CSV, fields)
 
 
 def append_success_report(now, added_items):
@@ -2488,6 +2514,7 @@ def append_success_report(now, added_items):
         if new_file:
             writer.writeheader()
         writer.writerow(row)
+    sort_report_csv_newest_first(SUCCESS_REPORT_CSV, fields)
 
 
 def main():
