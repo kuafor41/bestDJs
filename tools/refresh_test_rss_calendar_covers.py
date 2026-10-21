@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
