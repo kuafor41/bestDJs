@@ -261,7 +261,7 @@ def _square_variant_score(url, width=0, height=0):
     parsed = urlparse(url)
     if not re.search(r"\.(?:jpe?g|png|webp|avif|gif)$", parsed.path, re.I):
         return None
-    match = re.search(r"[-_](\d{2,5})x(\d{2,5})(?=\\.[^.]+$)", parsed.path, re.I)
+    match = re.search(r"[-_](\d{2,5})x(\d{2,5})\.[^.]+$", parsed.path, re.I)
     if match:
         w, h = int(match.group(1)), int(match.group(2))
         if w != h:
