@@ -16,7 +16,8 @@ on:
       - "tests/test_feed.py"
       - ".github/workflows/update-feed.yml"
   schedule:
-    - cron: "17 */6 * * *"
+    # Three runs daily at 03:17, 11:17, and 19:17 Europe/Istanbul (UTC+3).
+    - cron: "17 0,8,16 * * *"
 
 permissions:
   contents: write
