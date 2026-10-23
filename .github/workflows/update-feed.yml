@@ -16,8 +16,9 @@ on:
       - "tests/test_feed.py"
       - ".github/workflows/update-feed.yml"
   schedule:
-    # Three runs daily at 03:17, 11:17, and 19:17 Europe/Istanbul (UTC+3).
-    - cron: "17 0,8,16 * * *"
+    # Two runs daily at 05:30 and 19:30 Türkiye time (Europe/Istanbul, UTC+3).
+    # GitHub Actions cron uses UTC; scheduled starts may be delayed.
+    - cron: "30 2,16 * * *"
 
 permissions:
   contents: write
