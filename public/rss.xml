@@ -8,7 +8,7 @@
 <itunes:author>bestDJs</itunes:author>
 <itunes:category text="Music"/>
 <itunes:explicit>no</itunes:explicit>
-<lastBuildDate>Fri, 23 Oct 2026 20:18:02 GMT</lastBuildDate>
+<lastBuildDate>Sat, 24 Oct 2026 07:37:30 GMT</lastBuildDate>
 <itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/bestdjs-cover.jpg"/>
 <item>
 <title>Global DJ Broadcast (22.10.2026)</title>
@@ -442,6 +442,34 @@ Size: 179 Mb
 15. Kamilo Sanclemente – The Background</description>
 <itunes:image href="https://www.topdjmixes.com/wp-content/uploads/2026/08/Underground-Live-Forever-600x600.webp"/>
 <enclosure url="https://files.topdjmixes.com/UndergroundLiveForever/Paul%20Thomas%20&amp;%20Das%20Pharaoh%20-%20Underground%20Live%20Forever%20Episode%20046_2SDG9CBkbLtnNdq.mp3" length="188267091" type="audio/mpeg"/>
+<itunes:explicit>no</itunes:explicit>
+</item>
+<item>
+<title>Club Room 441</title>
+<link>https://www.topdjmixes.com/club-room-441/</link>
+<guid isPermaLink="true">https://www.topdjmixes.com/club-room-441/</guid>
+<pubDate>Thu, 22 Oct 2026 00:00:00 GMT</pubDate>
+<description>Date: 22-10-2026
+Audio: 320 Kbps
+Size: 138 mb
+
+
+Monty Luke
+01. A Life In Space – Single Origin
+02. K-LONE – Holdup
+03. Borai – Seafoam Green
+04. Levon Vincent – Greetings And Salutations (Levon Vincent Original Mix)
+05. Monty Luke – The Shootout (Bluebottle Mix)
+06. Abacus – Infinitely Loaded
+07. Nacho Marco &amp; Raoul Lambert – Cinnamon Dreams (DJ Deep Remix)
+08. D.O.S. Tapes – Two Dogs (BOND St. Sessions Remix)
+09. Mike Dunn &amp; Luis Radio &amp; Victor Simonelli – Nothing Stays The Same
+10. Nocten – Dancing (Let’s Go)
+11. Ari Bald &amp; CJ Scott – King Conga
+12. Cowboy Rhythmbox – Latin Sex Change
+13. Zopelar – Reasons Why</description>
+<itunes:image href="https://raw.githubusercontent.com/kuafor41/bestDJs/main/public/episode-artwork/d3798480756863d5a9fbbf25e3b8e06185a9b768c2ed69b24020df1820d60e52.jpg"/>
+<enclosure url="https://files.topdjmixes.com/ClubRoom/Anja%20Schneider%20-%20Club%20Room%20Episode%20441_m6ch28Cr2U9CrYS.mp3" length="144818391" type="audio/mpeg"/>
 <itunes:explicit>no</itunes:explicit>
 </item>
 <item>
